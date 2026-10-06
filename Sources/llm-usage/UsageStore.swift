@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import UserNotifications
 
 @MainActor
 final class UsageStore: ObservableObject {
@@ -27,6 +28,8 @@ final class UsageStore: ObservableObject {
     @Published var budgetSpend: Double = 0
     @Published var budgetDuration: String?
     @Published var budgetResetsAt: Date?
+    @Published private var lastNotifiedThreshold: Int?
+    @Published var notificationsAuthorized: Bool = false
 
     private var timer: Timer?
     private var apiKey: String?
@@ -119,6 +122,18 @@ final class UsageStore: ObservableObject {
 
         if !self.needsSetup {
             startPolling()
+        }
+
+        Task { await requestNotificationPermission() }
+    }
+
+    private func requestNotificationPermission() async {
+        let center = UNUserNotificationCenter.current()
+        do {
+            let granted = try await center.requestAuthorization(options: [.alert, .sound])
+            notificationsAuthorized = granted
+        } catch {
+            notificationsAuthorized = false
         }
     }
 
@@ -360,9 +375,38 @@ final class UsageStore: ObservableObject {
             }
             NSLog("LLMUsage budget: max=%@ spend=%.2f duration=%@",
                   String(describing: budgetMax), budgetSpend, budgetDuration ?? "?")
+            checkBudgetCrossings()
         } catch {
             NSLog("LLMUsage budget fetch error: %@", error.localizedDescription)
         }
+    }
+
+    private func checkBudgetCrossings() {
+        guard notificationsAuthorized, let max = budgetMax, max > 0 else { return }
+        let pct = Int((budgetSpend / max) * 100)
+        for threshold in [80, 90, 100] {
+            if pct >= threshold && lastNotifiedThreshold != threshold {
+                lastNotifiedThreshold = threshold
+                sendBudgetNotification(percent: threshold)
+                break
+            }
+        }
+        // Reset memory once spend drops below the lowest threshold (e.g. after budget reset).
+        if pct < 80 { lastNotifiedThreshold = nil }
+    }
+
+    private func sendBudgetNotification(percent: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "LLM Budget Alert"
+        content.body = "You've used \(percent)% of your $\(String(format: "%.2f", budgetMax ?? 0)) budget (rolling \(budgetDuration ?? "period"))."
+        content.sound = .default
+        let req = UNNotificationRequest(
+            identifier: "llm-budget.\(percent)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(req) { _ in }
+        NSLog("LLMUsage notified at %d%% budget", percent)
     }
 
     var menuBarText: String {
