@@ -1,12 +1,27 @@
 # LLM Usage — Menu Bar + Desktop Widget
 
-Menu bar app (works now) + Xcode widget scaffold (for later).
+Menu bar widget for LiteLLM-compatible LLM gateways. Configurable URL, no defaults.
 
-## Download
+## Install
+
+```bash
+git clone https://github.com/madhupmamodia/llm-usage.git
+cd llm-usage
+./bin/bundle.sh --install
+```
+
+Builds locally + installs to `/Applications` + launches. No download, no Gatekeeper prompt (locally-built apps aren't quarantined, and the bundle script strips any inherited xattrs).
+
+To update later: `git pull && ./bin/bundle.sh --install`.
+To uninstall: `./bin/bundle.sh --uninstall`.
+
+## Releases (alternative)
 
 → https://github.com/madhupmamodia/llm-usage/releases
 
-Every push to `main` auto-cuts a new version (`v1.0.0` → `v1.0.1` → …) and attaches `LLMUsage.zip`. To bump minor/major manually:
+Pre-built `LLMUsage.zip` available if you don't want to clone+build. **Ad-hoc signed** (no Apple Dev account) — on first launch macOS shows Gatekeeper. Workaround: right-click `LLMUsage.app` → Open → "Open" in dialog. Once done, app is trusted forever.
+
+Every push to `main` auto-cuts a new version (`v1.0.0` → `v1.0.1` → …). To bump minor/major manually:
 ```bash
 git tag v1.1.0 && git push --tags
 ```
@@ -15,39 +30,25 @@ git tag v1.1.0 && git push --tags
 
 ![Main view — stats, budget bar, top models](docs/screenshots/main.png)
 
-![Setup view — first launch, paste API key](docs/screenshots/setup.png)
-
-## Run menu bar app
-
-```bash
-cd ~/workspace/llm-usage
-swift build -c release
-open ./LLMUsage.app
-```
-
-Look for ✨ `$XX.XX` in your menu bar. Click for today's spend, week-to-date, top models, refresh.
+![Setup view — first launch, paste API key + URL](docs/screenshots/setup.png)
 
 ## Configure
 
-API key + optional user_id are read from files in `$HOME`:
+On first launch, the setup screen asks for:
+- **API key** — your gateway API key
+- **Gateway URL** — full URL to your LiteLLM instance (e.g. `https://llm-gateway.example.com`)
+- **user_id** — optional, scopes spend to your account only
 
+Saved to mode 600 files in `$HOME`:
 ```bash
-umask 077
-printf '%s' "sk-..." > ~/.llm-usage-key
-printf '%s' "<your-user-id>" > ~/.llm-usage-user   # optional, scopes to your own spend
-chmod 600 ~/.llm-usage-key ~/.llm-usage-user
+~/.llm-usage-key       # API key
+~/.llm-usage-config    # Gateway URL
+~/.llm-usage-user      # user_id (optional)
 ```
-
-Find your `user_id` in the LLM Gateway UI → URL bar → value after `user_id=`.
 
 ### Auto-detect from `~/.zshrc`
 
 If `~/.llm-usage-key` is missing, the app parses `~/.zshrc` for `LITELLM_API_KEY="..."` and pre-fills the setup screen (badged "detected from ~/.zshrc"). Edit, replace, or save as-is — your choice.
-
-## Gateway URL
-
-Default points at Multiplier's LLM Gateway: `https://llm-gateway.usemultiplier.cloud`.
-To point at a different LiteLLM instance, edit `Sources/llm-usage/UsageStore.swift:28` and `Widget/LLMUsageWidget.swift:73`.
 
 ## Auto-start at login
 
@@ -61,14 +62,17 @@ The `Widget/` directory is the Swift source + Info.plist + entitlements for a re
 2. Open Xcode → File → New → Project → macOS → App (SwiftUI). Name it `LLMUsage`.
 3. File → New → Target → Widget Extension → name `LLMUsageWidget`, uncheck "Include Configuration Intent".
 4. In the new target, replace its generated `.swift` and `Info.plist` with the files in `Widget/`.
-5. Signing & Capabilities → select your team. Add App Groups capability → `group.com.madhup.llm-usage` on both targets.
+5. Signing & Capabilities → select your team.
 6. Build & run the app once (so the widget is registered), then right-click desktop → "Add Widget" → search `LLM Usage`.
 
-The widget reads `~/.llm-usage-key` directly — same files as the menu bar app, no copy needed.
+The widget reads the same `~/.llm-usage-*` files as the menu bar app.
 
 ## Files
 
 - `Package.swift` — SPM manifest for the menu bar app.
 - `Sources/llm-usage/` — Swift sources (Models, UsageStore, App).
+- `bin/bundle.sh` — rebuild script (`./bin/bundle.sh` to refresh `LLMUsage.app`).
+- `Resources/Info.plist` — bundle metadata.
 - `LLMUsage.app/` — built bundle. `open LLMUsage.app` to run.
 - `Widget/` — Xcode widget extension sources for later.
+- `.github/workflows/build.yml` — CI: build + auto-bump version + release on every push.

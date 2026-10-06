@@ -31,8 +31,8 @@ final class UsageStore: ObservableObject {
     private var timer: Timer?
     private var apiKey: String?
     private var userId: String?
-    private var baseURL: URL
-    static let defaultURL = "https://llm-gateway.usemultiplier.cloud"
+    private var baseURL: URL?
+    static let defaultURL = ""  // intentionally empty — user must provide
 
     static let isoCal: Calendar = {
         var c = Calendar(identifier: .iso8601)
@@ -96,14 +96,13 @@ final class UsageStore: ObservableObject {
         let storedKey = Self.readFile(keyPath)
         let uid = Self.readFile(userPath)
         let storedURL = Self.readFile(configPath)
-        let resolvedURL = storedURL ?? Self.defaultURL
 
         self.apiKey = storedKey
         self.userId = uid
-        self.baseURL = URL(string: resolvedURL) ?? URL(string: Self.defaultURL)!
+        self.baseURL = storedURL.flatMap { URL(string: $0) }
         self.setupKey = storedKey ?? ""
         self.setupUserId = uid ?? ""
-        self.setupURL = resolvedURL
+        self.setupURL = storedURL ?? ""
         self.needsSetup = (storedKey == nil)
 
         // If no saved key, fall back to ~/.zshrc for an auto-detected value.
@@ -223,6 +222,10 @@ final class UsageStore: ObservableObject {
             lastError = "API key is empty"
             return
         }
+        guard !urlText.isEmpty else {
+            lastError = "Gateway URL is required"
+            return
+        }
         guard let url = URL(string: urlText), url.scheme == "https" || url.scheme == "http" else {
             lastError = "Gateway URL must start with http(s)://"
             return
@@ -257,13 +260,17 @@ final class UsageStore: ObservableObject {
     func openSetup() {
         setupKey = apiKey ?? ""
         setupUserId = userId ?? ""
-        setupURL = baseURL.absoluteString
+        setupURL = baseURL?.absoluteString ?? ""
         needsSetup = true
     }
 
     func fetch() async {
         guard let apiKey else {
             lastError = "No API key at ~/.llm-usage-key"
+            return
+        }
+        guard let baseURL else {
+            lastError = "No gateway URL configured"
             return
         }
         isLoading = true
@@ -319,6 +326,7 @@ final class UsageStore: ObservableObject {
     }
 
     private func fetchBudget(apiKey: String) async {
+        guard let baseURL else { return }
         var comps = URLComponents(url: baseURL.appendingPathComponent("user/info"), resolvingAgainstBaseURL: false)!
         if let userId {
             comps.queryItems = [URLQueryItem(name: "user_id", value: userId)]

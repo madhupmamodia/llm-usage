@@ -68,7 +68,7 @@ struct SetupView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Gateway URL").font(.caption2).foregroundStyle(.secondary)
-                TextField("https://llm-gateway.usemultiplier.cloud", text: $store.setupURL)
+                TextField("https://your-gateway.example.com", text: $store.setupURL)
                     .textFieldStyle(.roundedBorder)
             }
 

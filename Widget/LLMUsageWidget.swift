@@ -70,13 +70,20 @@ struct UsageProvider: TimelineProvider {
         let start = f.string(from: weekStart)
         let end = f.string(from: now)
 
-        // Gateway URL: read from ~/.llm-usage-config, fall back to Multiplier default.
+        // Gateway URL: read from ~/.llm-usage-config — no default, user must configure.
         let configPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".llm-usage-config")
-        let storedURL = (try? String(contentsOf: configPath, encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let baseURL = (storedURL?.isEmpty == false ? storedURL : nil)
-            ?? "https://llm-gateway.usemultiplier.cloud"
+        guard let storedRaw = try? String(contentsOf: configPath, encoding: .utf8) else {
+            return UsageEntry(date: .now, todaySpend: 0, weekSpend: 0,
+                              weekTokens: 0, weekRequests: 0,
+                              lastError: "no ~/.llm-usage-config")
+        }
+        let baseURL = storedRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !baseURL.isEmpty, URL(string: baseURL) != nil else {
+            return UsageEntry(date: .now, todaySpend: 0, weekSpend: 0,
+                              weekTokens: 0, weekRequests: 0,
+                              lastError: "invalid ~/.llm-usage-config")
+        }
 
         var comps = URLComponents(string: "\(baseURL)/user/daily/activity")!
         var items = [
