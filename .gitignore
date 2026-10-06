@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+*.zip
+LLMUsage.app/
+.DS_Store
