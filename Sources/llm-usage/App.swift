@@ -104,9 +104,12 @@ struct StatsView: View {
         VStack(alignment: .leading, spacing: 6) {
             navHeader
             if let err = store.lastError {
-                Text("⚠︎ \(err)")
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                errorBanner(err)
+            } else if store.isShowingStale, let last = store.lastFetch {
+                Label("stale — last successful \(last.formatted(date: .omitted, time: .standard))",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
             }
 
             row("Today",    String(format: "$%.2f", store.todaySpend))
@@ -151,6 +154,38 @@ struct StatsView: View {
         }
         .padding(14)
         .frame(width: 280)
+    }
+
+    private func errorBanner(_ err: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("⚠︎ \(err)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                Spacer()
+                Button("Retry") { Task { await store.fetch() } }
+                    .controlSize(.small)
+                    .disabled(store.isLoading)
+            }
+            if Self.looksLikeNetworkError(err) {
+                Text("Check VPN or gateway URL in setup.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let last = store.lastFetch {
+                Text("Last good fetch: \(last.formatted(date: .omitted, time: .standard))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private static func looksLikeNetworkError(_ msg: String) -> Bool {
+        let s = msg.lowercased()
+        let needles = ["timed out", "timeout", "network", "connection",
+                       "unreachable", "offline", "could not connect", "host is down"]
+        return needles.contains { s.contains($0) }
     }
 
     private var rangeTitle: String {

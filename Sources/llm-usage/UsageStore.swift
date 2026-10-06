@@ -69,6 +69,8 @@ final class UsageStore: ObservableObject {
 
     var hasBudget: Bool { budgetMax != nil && budgetMax ?? 0 > 0 }
 
+    var isShowingStale: Bool { lastError != nil && !dailyBreakdown.isEmpty }
+
     var budgetFraction: Double {
         guard let m = budgetMax, m > 0 else { return 0 }
         return min(1.0, budgetSpend / m)
