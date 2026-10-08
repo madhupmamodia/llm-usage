@@ -32,7 +32,6 @@ done
 if ! command -v swift >/dev/null 2>&1; then
   echo "❌ Swift not found. Install Command Line Tools:"
   echo "   xcode-select --install"
-  echo "   (then run: sudo xcodebuild -license accept)"
   exit 1
 fi
 
@@ -42,11 +41,14 @@ if ! command -v codesign >/dev/null 2>&1; then
   exit 1
 fi
 
-# License check. swift build will fail with a cryptic error if license isn't accepted.
-if ! xcodebuild -license check >/dev/null 2>&1; then
-  echo "❌ Xcode license not accepted. Run:"
-  echo "   sudo xcodebuild -license accept"
-  exit 1
+# Only check Xcode license if xcodebuild actually exists (full Xcode install).
+# CommandLineTools-only setups don't have xcodebuild and don't need license acceptance.
+if command -v xcodebuild >/dev/null 2>&1; then
+  if ! xcodebuild -license check >/dev/null 2>&1; then
+    echo "❌ Xcode license not accepted. Run:"
+    echo "   sudo xcodebuild -license accept"
+    exit 1
+  fi
 fi
 
 echo "Building release..."
