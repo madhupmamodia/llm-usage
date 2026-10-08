@@ -41,13 +41,15 @@ if ! command -v codesign >/dev/null 2>&1; then
   exit 1
 fi
 
-# Only check Xcode license if xcodebuild actually exists (full Xcode install).
-# CommandLineTools-only setups don't have xcodebuild and don't need license acceptance.
-if command -v xcodebuild >/dev/null 2>&1; then
-  if ! xcodebuild -license check >/dev/null 2>&1; then
-    echo "❌ Xcode license not accepted. Run:"
-    echo "   sudo xcodebuild -license accept"
-    exit 1
+# Only check Xcode license if running a real Xcode install.
+# CLT-only setups have an xcodebuild shim that errors with "requires Xcode" — skip them.
+if xcode-select -p 2>/dev/null | grep -qv "CommandLineTools"; then
+  if command -v xcodebuild >/dev/null 2>&1; then
+    if ! xcodebuild -license check >/dev/null 2>&1; then
+      echo "❌ Xcode license not accepted. Run:"
+      echo "   sudo xcodebuild -license accept"
+      exit 1
+    fi
   fi
 fi
 
