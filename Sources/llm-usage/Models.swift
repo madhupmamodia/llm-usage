@@ -97,6 +97,8 @@ struct ModelLatency: Identifiable {
 
 struct Telemetry {
     var sampleSize: Int = 0
+    var totalInRange: Int = 0                 // total logs in date range, may exceed sampleSize
+    var wasCapped: Bool = false               // true if totalInRange > sampleSize
     var latencyByModel: [ModelLatency] = []   // top 5 by request count
     var totalRequests: Int = 0
     var errorCount: Int = 0
@@ -104,9 +106,6 @@ struct Telemetry {
     var topFailingModel: (name: String, count: Int)?
     var cacheHitRate: Double = 0              // 0.0 - 1.0
     var cacheTokensSaved: Int = 0
-    var inputTokens: Int = 0
-    var outputTokens: Int = 0
-    var tokenEfficiency: Double = 0           // output / input (1.0 = equal)
 
     var cacheSavingsUSD: Double = 0           // not implemented yet — placeholder
 }

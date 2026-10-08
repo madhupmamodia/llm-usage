@@ -1,6 +1,15 @@
 import Foundation
 import Combine
+import SwiftUI
 import UserNotifications
+
+// MARK: - UI
+
+enum AppTab: String, CaseIterable, Identifiable {
+    case overview, insights
+    var id: String { rawValue }
+    var label: String { self == .overview ? "Overview" : "Insights" }
+}
 
 @MainActor
 final class UsageStore: ObservableObject {
@@ -24,6 +33,7 @@ final class UsageStore: ObservableObject {
     @Published var showCustomRange: Bool = false
     @Published var customStartText: String = ""
     @Published var customEndText: String = ""
+    @Published var activeTab: AppTab = .overview
     @Published var budgetMax: Double?
     @Published var budgetSpend: Double = 0
     @Published var budgetDuration: String?
@@ -295,6 +305,14 @@ final class UsageStore: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
+        // Run all three in parallel. If any one fails, the others still complete.
+        async let activity: Void = fetchActivity(apiKey: apiKey, baseURL: baseURL)
+        async let budget: Void = fetchBudget(apiKey: apiKey)
+        async let telemetry: Void = fetchTelemetry(apiKey: apiKey)
+        _ = await (activity, budget, telemetry)
+    }
+
+    private func fetchActivity(apiKey: String, baseURL: URL) async {
         let start = Self.apiDateFmt.string(from: rangeStart)
         let end = Self.apiDateFmt.string(from: rangeEnd)
 
@@ -339,24 +357,14 @@ final class UsageStore: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
-
-        // Budget is rolling (e.g. 7d) — independent of selected date range.
-        await fetchBudget(apiKey: apiKey)
-        await fetchTelemetry(apiKey: apiKey)
     }
 
     private func fetchTelemetry(apiKey: String) async {
         guard let baseURL else { return }
-        // Pull today + yesterday to get a meaningful sample even on a quiet day.
-        let cal = Calendar(identifier: .iso8601)
-        let now = Date()
-        let yesterday = cal.date(byAdding: .day, value: -1, to: now) ?? now
-        let startStr = Self.apiDateFmt.string(from: yesterday)
-        let endStr = Self.apiDateFmt.string(from: now)
         var comps = URLComponents(url: baseURL.appendingPathComponent("spend/logs/v2"), resolvingAgainstBaseURL: false)!
         comps.queryItems = [
-            URLQueryItem(name: "start_date", value: startStr),
-            URLQueryItem(name: "end_date", value: endStr),
+            URLQueryItem(name: "start_date", value: Self.apiDateFmt.string(from: rangeStart)),
+            URLQueryItem(name: "end_date", value: Self.apiDateFmt.string(from: rangeEnd)),
             URLQueryItem(name: "page", value: "1"),
             URLQueryItem(name: "page_size", value: "1000"),
         ]
@@ -371,9 +379,13 @@ final class UsageStore: ObservableObject {
             let (data, response) = try await URLSession.shared.data(for: r)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
             let decoded = try JSONDecoder().decode(SpendLogResponse.self, from: data)
-            telemetry = Self.computeTelemetry(from: decoded.data ?? [])
-            NSLog("LLMUsage telemetry: %d logs, %d errors, %d cache tokens",
-                  telemetry.sampleSize, telemetry.errorCount, telemetry.cacheTokensSaved)
+            let logs = decoded.data ?? []
+            // Sample cap: API returns 1000 max per page. If total > sample, flag it.
+            telemetry = Self.computeTelemetry(from: logs)
+            telemetry.totalInRange = decoded.total ?? logs.count
+            telemetry.wasCapped = (telemetry.totalInRange > logs.count)
+            NSLog("LLMUsage telemetry: %d/%d logs, %d errors, %d cache tokens",
+                  logs.count, telemetry.totalInRange, telemetry.errorCount, telemetry.cacheTokensSaved)
         } catch {
             NSLog("LLMUsage telemetry fetch error: %@", error.localizedDescription)
         }
@@ -421,12 +433,12 @@ final class UsageStore: ObservableObject {
             let prompt = usage?.prompt_tokens ?? log.prompt_tokens ?? 0
             let completion = usage?.completion_tokens ?? log.completion_tokens ?? 0
             let cacheRead = usage?.cache_read_input_tokens ?? 0
-            t.inputTokens += prompt
-            t.outputTokens += completion
             t.cacheTokensSaved += cacheRead
             // totalTokens used here includes cached reads; for hit-rate denom
             // we want the full input stream including cache.
             _ = total
+            _ = prompt
+            _ = completion
         }
 
         t.totalRequests = logs.count
@@ -434,9 +446,12 @@ final class UsageStore: ObservableObject {
         t.errorRate = t.totalRequests > 0 ? Double(t.errorCount) / Double(t.totalRequests) : 0
         t.topFailingModel = errorsByModel.max { $0.value < $1.value }.map { ($0.key, $0.value) }
 
-        let denomCache = t.inputTokens + t.cacheTokensSaved
-        t.cacheHitRate = denomCache > 0 ? Double(t.cacheTokensSaved) / Double(denomCache) : 0
-        t.tokenEfficiency = t.inputTokens > 0 ? Double(t.outputTokens) / Double(t.inputTokens) : 0
+        let denomCache = t.cacheTokensSaved // cache hits / (cache hits + non-cached input)
+        // We don't have non-cached input separately; the usage_object only has
+        // prompt_tokens which is what got sent (including cache reads counted
+        // separately). Use a simpler ratio: cache_read / total_tokens.
+        let totalAll = logs.reduce(0) { $0 + ($1.metadata?.usage_object?.total_tokens ?? $1.total_tokens ?? 0) }
+        t.cacheHitRate = totalAll > 0 ? Double(t.cacheTokensSaved) / Double(totalAll) : 0
 
         // Top models by latency, capped to 5 by request count.
         let top = latencies

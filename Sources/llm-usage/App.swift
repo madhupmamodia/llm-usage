@@ -102,7 +102,14 @@ struct StatsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            navHeader
+            Picker("", selection: $store.activeTab) {
+                ForEach(AppTab.allCases) { tab in
+                    Text(tab.label).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
             if let err = store.lastError {
                 errorBanner(err)
             } else if store.isShowingStale, let last = store.lastFetch {
@@ -112,6 +119,32 @@ struct StatsView: View {
                     .foregroundStyle(.orange)
             }
 
+            if store.activeTab == .overview {
+                overviewTab
+            } else {
+                telemetryTab
+            }
+
+            Divider().padding(.vertical, 2)
+            HStack {
+                Button(store.isLoading ? "Refreshing…" : "Refresh") {
+                    Task { await store.fetch() }
+                }
+                .disabled(store.isLoading)
+                Button("Change key") { store.openSetup() }
+                Spacer()
+                Button("Quit") { NSApp.terminate(nil) }
+                    .keyboardShortcut("q")
+            }
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+
+    private var overviewTab: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            navHeader
+
             row("Today",    String(format: "$%.2f", store.todaySpend))
             row(rangeTitle, String(format: "$%.2f", store.rangeSpend))
             row("Tokens",   formatTokens(store.rangeTokens), secondary: true)
@@ -120,11 +153,6 @@ struct StatsView: View {
             if store.hasBudget {
                 Divider().padding(.vertical, 2)
                 budgetSection
-            }
-
-            if store.telemetry.sampleSize > 0 {
-                Divider().padding(.vertical, 2)
-                telemetrySection
             }
 
             if !store.topModelsToday.isEmpty {
@@ -144,21 +172,33 @@ struct StatsView: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
+        }
+    }
 
-            Divider().padding(.vertical, 2)
+    private var telemetryTab: some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Button(store.isLoading ? "Refreshing…" : "Refresh") {
-                    Task { await store.fetch() }
-                }
-                .disabled(store.isLoading)
-                Button("Change key") { store.openSetup() }
+                Text(store.rangeLabel)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("Quit") { NSApp.terminate(nil) }
-                    .keyboardShortcut("q")
+                if store.telemetry.wasCapped {
+                    Text("sample of \(store.telemetry.sampleSize)/\(store.telemetry.totalInRange)")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .padding(.bottom, 2)
+
+            if store.telemetry.sampleSize > 0 {
+                telemetrySection
+            } else {
+                Text("No spend logs in this range yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 12)
             }
         }
-        .padding(14)
-        .frame(width: 280)
     }
 
     private func errorBanner(_ err: String) -> some View {
@@ -315,26 +355,8 @@ struct StatsView: View {
 
     private var telemetrySection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Telemetry (last 24h)")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
             if !store.telemetry.latencyByModel.isEmpty {
-                Text("Latency (p50 / p95)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                ForEach(store.telemetry.latencyByModel) { m in
-                    HStack {
-                        Text(shortName(m.model))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 8)
-                        Text("\(formatMs(m.p50)) / \(formatMs(m.p95))")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.caption2)
-                }
+                latencyTable
             }
 
             HStack {
@@ -367,17 +389,34 @@ struct StatsView: View {
                 }
                 .font(.caption2)
             }
+        }
+    }
 
-            if store.telemetry.inputTokens > 0 {
+    private var latencyTable: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Model").foregroundStyle(.tertiary)
+                Spacer(minLength: 8)
+                Text("p50").foregroundStyle(.tertiary)
+                    .frame(width: 50, alignment: .trailing)
+                Text("p95").foregroundStyle(.tertiary)
+                    .frame(width: 50, alignment: .trailing)
+            }
+            .font(.caption2)
+            ForEach(store.telemetry.latencyByModel) { m in
                 HStack {
-                    Text("Token eff.").foregroundStyle(.secondary)
+                    Text(shortName(m.model))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     Spacer(minLength: 8)
-                    Text("1 : \(String(format: "%.1f", store.telemetry.tokenEfficiency))")
+                    Text(formatMs(m.p50))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
-                    Text("  (out:in)")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                        .frame(width: 50, alignment: .trailing)
+                    Text(formatMs(m.p95))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 50, alignment: .trailing)
                 }
                 .font(.caption2)
             }
