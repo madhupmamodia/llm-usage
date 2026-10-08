@@ -302,8 +302,6 @@ struct StatsView: View {
                     HStack(spacing: 4) {
                         Text(syncAgentOptions.first(where: { $0.id == selectedAgent })?.label ?? "Pick agent")
                             .font(.system(size: 12))
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 9))
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
