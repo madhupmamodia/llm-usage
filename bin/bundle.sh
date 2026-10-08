@@ -80,9 +80,13 @@ fi
 
 echo "Wrapping in $APP_DIR..."
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp ".build/release/llm-usage" "$APP_DIR/Contents/MacOS/llm-usage"
 cp "Resources/Info.plist" "$APP_DIR/Contents/Info.plist"
+if [[ -f "bin/sync-models" ]]; then
+  cp "bin/sync-models" "$APP_DIR/Contents/Resources/sync-models"
+  chmod +x "$APP_DIR/Contents/Resources/sync-models"
+fi
 chmod +x "$APP_DIR/Contents/MacOS/llm-usage"
 
 # Ad-hoc sign + strip xattrs so local builds don't hit Gatekeeper.

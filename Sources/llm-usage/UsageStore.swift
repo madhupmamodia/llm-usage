@@ -1,6 +1,21 @@
 import Foundation
 import Combine
+import SwiftUI
 import UserNotifications
+
+// MARK: - UI
+
+enum AppTab: String, CaseIterable, Identifiable {
+    case overview, insights, models
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .overview: return "Overview"
+        case .insights: return "Insights"
+        case .models: return "Models"
+        }
+    }
+}
 
 @MainActor
 final class UsageStore: ObservableObject {
@@ -24,18 +39,23 @@ final class UsageStore: ObservableObject {
     @Published var showCustomRange: Bool = false
     @Published var customStartText: String = ""
     @Published var customEndText: String = ""
+    @Published var activeTab: AppTab = .overview
+    @Published var availableModels: [AvailableModel] = []
+    @Published var modelDetails: [String: ModelDetail] = [:]   // keyed by model name from /v2/model/info
+    @Published var syncStatus: String = ""               // last sync result text
+    private var lastSyncedAt: Date?
     @Published var budgetMax: Double?
     @Published var budgetSpend: Double = 0
     @Published var budgetDuration: String?
     @Published var budgetResetsAt: Date?
     @Published private var lastNotifiedThreshold: Int?
-    @Published var notificationsAuthorized: Bool = false
+    private var notificationsAuthorized: Bool = false
 
     private var timer: Timer?
+    private var modelsTimer: Timer?
     private var apiKey: String?
     private var userId: String?
     private var baseURL: URL?
-    static let defaultURL = ""  // intentionally empty — user must provide
 
     static let isoCal: Calendar = {
         var c = Calendar(identifier: .iso8601)
@@ -88,15 +108,20 @@ final class UsageStore: ObservableObject {
         return Int(interval / 86400)
     }
 
+    @Published var telemetry: Telemetry = Telemetry()
+
     private let keyPath: URL
     private let userPath: URL
     private let configPath: URL
+    private let modelsPath: URL
+    static let modelsRefreshInterval: TimeInterval = 3_600  // 1h — model lists change rarely
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         self.keyPath = home.appendingPathComponent(".llm-usage-key")
         self.userPath = home.appendingPathComponent(".llm-usage-user")
         self.configPath = home.appendingPathComponent(".llm-usage-config")
+        self.modelsPath = home.appendingPathComponent(".llm-usage-models.json")
 
         let storedKey = Self.readFile(keyPath)
         let uid = Self.readFile(userPath)
@@ -124,9 +149,139 @@ final class UsageStore: ObservableObject {
 
         if !self.needsSetup {
             startPolling()
+            startModelsTimer()
+            // Fetch models + costs once at launch so prices are visible immediately.
+            Task { await self.refreshModels() }
         }
 
+        loadModelsCache()
         Task { await requestNotificationPermission() }
+    }
+
+    private func startModelsTimer() {
+        modelsTimer?.invalidate()
+        modelsTimer = Timer.scheduledTimer(withTimeInterval: Self.modelsRefreshInterval, repeats: true) { _ in
+            Task { @MainActor in
+                await self.refreshModels()
+            }
+        }
+    }
+
+    // Per-tab refresh. Each fetches only what its tab needs.
+    func refreshOverview() async {
+        guard let apiKey, let baseURL else { return }
+        isLoading = true
+        async let a: Void = fetchActivity(apiKey: apiKey, baseURL: baseURL)
+        async let b: Void = fetchBudget(apiKey: apiKey)
+        _ = await (a, b)
+        isLoading = false
+    }
+
+    func refreshInsights() async {
+        guard let apiKey, let baseURL else { return }
+        isLoading = true
+        await fetchTelemetry(apiKey: apiKey)
+        isLoading = false
+    }
+
+    func refreshModels() async {
+        guard let apiKey, let baseURL else { return }
+        isLoading = true
+        async let list: Void = fetchModels(apiKey: apiKey, baseURL: baseURL)
+        async let costs: Void = fetchModelCosts(apiKey: apiKey, baseURL: baseURL)
+        _ = await (list, costs)
+        isLoading = false
+    }
+
+    func refreshCurrentTab() async {
+        switch activeTab {
+        case .overview: await refreshOverview()
+        case .insights: await refreshInsights()
+        case .models: await refreshModels()
+        }
+    }
+
+    private func loadModelsCache() {
+        guard let data = try? Data(contentsOf: modelsPath),
+              let cache = try? JSONDecoder.iso.decode(ModelsCache.self, from: data) else { return }
+        availableModels = cache.models
+    }
+
+    private func fetchModels(apiKey: String, baseURL: URL) async {
+        var comps = URLComponents(url: baseURL.appendingPathComponent("models"), resolvingAgainstBaseURL: false)!
+        comps.queryItems = [
+            URLQueryItem(name: "return_wildcard_routes", value: "false"),
+            URLQueryItem(name: "include_model_access_groups", value: "false"),
+            URLQueryItem(name: "only_model_access_groups", value: "false"),
+            URLQueryItem(name: "include_metadata", value: "false"),
+            URLQueryItem(name: "healthy_only", value: "false"),
+        ]
+        var req = URLRequest(url: comps.url!)
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            let decoded = try JSONDecoder().decode(ModelsAPIResponse.self, from: data)
+            let cache = ModelsCache(fetched_at: Date(), models: decoded.data)
+            let enc = JSONEncoder()
+            enc.dateEncodingStrategy = .iso8601
+            if let encoded = try? enc.encode(cache) {
+                try? encoded.write(to: modelsPath, options: .atomic)
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o644], ofItemAtPath: modelsPath.path
+                )
+            }
+            availableModels = decoded.data
+        } catch {
+            NSLog("LLMUsage models fetch error: %@", error.localizedDescription)
+        }
+    }
+
+    private func fetchModelCosts(apiKey: String, baseURL: URL) async {
+        var page = 1
+        var collected: [String: ModelDetail] = [:]
+        let logPath = "/tmp/llmusage-cost.log"
+        try? "starting fetchModelCosts\n".write(toFile: logPath, atomically: true, encoding: .utf8)
+        while true {
+            var comps = URLComponents(url: baseURL.appendingPathComponent("v2/model/info"), resolvingAgainstBaseURL: false)!
+            comps.queryItems = [
+                URLQueryItem(name: "include_team_models", value: "true"),
+                URLQueryItem(name: "page", value: "\(page)"),
+                URLQueryItem(name: "size", value: "50"),
+            ]
+            var req = URLRequest(url: comps.url!)
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            req.timeoutInterval = 15
+            do {
+                let (data, response) = try await URLSession.shared.data(for: req)
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                try? "page \(page) HTTP \(code) bytes=\(data.count)\n".write(toFile: logPath, atomically: false, encoding: .utf8)
+                guard code == 200 else { break }
+                let decoded = try JSONDecoder().decode(ModelInfoResponse.self, from: data)
+                let rows = decoded.data
+                if rows.isEmpty { break }
+                for row in rows {
+                    let mi = row.model_info
+                    collected[row.model_name] = ModelDetail(
+                        model_name: row.model_name,
+                        input_per_million: mi.input_cost_per_token.map { $0 * 1_000_000 },
+                        output_per_million: mi.output_cost_per_token.map { $0 * 1_000_000 },
+                        max_input_tokens: mi.max_input_tokens,
+                        max_output_tokens: mi.max_output_tokens,
+                        cache_read_per_million: mi.cache_read_input_token_cost.map { $0 * 1_000_000 },
+                        cache_creation_per_million: mi.cache_creation_input_token_cost.map { $0 * 1_000_000 }
+                    )
+                }
+                if rows.count < 50 { break }
+                page += 1
+            } catch {
+                try? "error: \(error)\n".write(toFile: logPath, atomically: false, encoding: .utf8)
+                break
+            }
+        }
+        modelDetails = collected
+        try? "done: \(collected.count) models, has claude-sonnet-5-5=\(collected["claude-sonnet-5-5"] != nil)\n".write(toFile: logPath, atomically: false, encoding: .utf8)
     }
 
     private func requestNotificationPermission() async {
@@ -267,10 +422,16 @@ final class UsageStore: ObservableObject {
     }
 
     func startPolling() {
-        Task { await fetch() }
+        Task {
+            await refreshOverview()
+            await refreshInsights()
+        }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
-            Task { @MainActor in await self.fetch() }
+            Task { @MainActor in
+                await self.refreshOverview()
+                await self.refreshInsights()
+            }
         }
     }
 
@@ -281,18 +442,62 @@ final class UsageStore: ObservableObject {
         needsSetup = true
     }
 
-    func fetch() async {
-        guard let apiKey else {
-            lastError = "No API key at ~/.llm-usage-key"
-            return
-        }
-        guard let baseURL else {
-            lastError = "No gateway URL configured"
-            return
-        }
-        isLoading = true
-        defer { isLoading = false }
+    func runSync(agents: Set<String>) {
+        // Cancel any pending auto-clear so old output doesn't get cleared mid-run.
+        clearTask?.cancel()
+        clearTask = nil
 
+        // Run the bundled sync-models script. Agents: opencode, pi, codex, cursor, hermes.
+        let onlyArg = agents.isEmpty ? "" : "--only=\(agents.sorted().joined(separator: ","))"
+        let task = Process()
+        let scriptPath = Bundle.main.path(forResource: "sync-models", ofType: nil)
+            ?? Bundle.main.bundlePath + "/Contents/Resources/sync-models"
+        task.executableURL = URL(fileURLWithPath: scriptPath)
+        var args: [String] = []
+        if !onlyArg.isEmpty { args.append(onlyArg) }
+        task.arguments = args
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+
+        syncStatus = "Syncing…"
+        do {
+            try task.run()
+        } catch {
+            syncStatus = "Failed to start: \(error.localizedDescription)"
+            return
+        }
+        // Read output on a background queue, then update on main.
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { return }
+            if let s = String(data: data, encoding: .utf8) {
+                Task { @MainActor in self.syncStatus = s.trimmingCharacters(in: .whitespacesAndNewlines) }
+            }
+        }
+        task.terminationHandler = { _ in
+            Task { @MainActor in
+                self.syncStatus = self.syncStatus + "\nDone."
+                self.lastSyncedAt = Date()
+                self.scheduleClear()
+            }
+        }
+    }
+
+    private var clearTask: Task<Void, Never>?
+
+    private func scheduleClear() {
+        clearTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 7_000_000_000)
+            if !Task.isCancelled {
+                self.syncStatus = ""
+                self.clearTask = nil
+            }
+        }
+    }
+
+    private func fetchActivity(apiKey: String, baseURL: URL) async {
         let start = Self.apiDateFmt.string(from: rangeStart)
         let end = Self.apiDateFmt.string(from: rangeEnd)
 
@@ -337,9 +542,106 @@ final class UsageStore: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
 
-        // Budget is rolling (e.g. 7d) — independent of selected date range.
-        await fetchBudget(apiKey: apiKey)
+    private func fetchTelemetry(apiKey: String) async {
+        guard let baseURL else { return }
+        var comps = URLComponents(url: baseURL.appendingPathComponent("spend/logs/v2"), resolvingAgainstBaseURL: false)!
+        comps.queryItems = [
+            URLQueryItem(name: "start_date", value: Self.apiDateFmt.string(from: rangeStart)),
+            URLQueryItem(name: "end_date", value: Self.apiDateFmt.string(from: rangeEnd)),
+            URLQueryItem(name: "page", value: "1"),
+            URLQueryItem(name: "page_size", value: "1000"),
+        ]
+        if let userId {
+            comps.queryItems?.append(URLQueryItem(name: "user_id", value: userId))
+        }
+        var r = URLRequest(url: comps.url!)
+        r.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 15
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: r)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            let decoded = try JSONDecoder().decode(SpendLogResponse.self, from: data)
+            let logs = decoded.data ?? []
+            // Sample cap: API returns 1000 max per page. If total > sample, flag it.
+            telemetry = Self.computeTelemetry(from: logs)
+            telemetry.totalInRange = decoded.total ?? logs.count
+            telemetry.wasCapped = (telemetry.totalInRange > logs.count)
+            NSLog("LLMUsage telemetry: %d/%d logs, %d errors, %d cache tokens",
+                  logs.count, telemetry.totalInRange, telemetry.errorCount, telemetry.cacheTokensSaved)
+        } catch {
+            NSLog("LLMUsage telemetry fetch error: %@", error.localizedDescription)
+        }
+    }
+
+    private static func computeTelemetry(from logs: [SpendLogEntry]) -> Telemetry {
+        var t = Telemetry()
+        t.sampleSize = logs.count
+
+        // Latency buckets by model.
+        var latencies: [String: [Double]] = [:]
+        var errorsByModel: [String: Int] = [:]
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoNoFrac = ISO8601DateFormatter()
+        isoNoFrac.formatOptions = [.withInternetDateTime]
+
+        for log in logs {
+            let model = log.model ?? "unknown"
+
+            // Latency.
+            if let s = log.startTime, let e = log.endTime,
+               let sd = iso.date(from: s) ?? isoNoFrac.date(from: s),
+               let ed = iso.date(from: e) ?? isoNoFrac.date(from: e) {
+                let ms = ed.timeIntervalSince(sd) * 1000
+                if ms >= 0 && ms < 600_000 { // ignore >10min as outliers
+                    latencies[model, default: []].append(ms)
+                }
+            }
+
+            // Error detection: status set, or error_information present.
+            let isError: Bool = {
+                if let status = log.metadata?.status, !status.isEmpty,
+                   status.lowercased() != "success" && status != "200" {
+                    return true
+                }
+                if log.metadata?.error_information != nil { return true }
+                return false
+            }()
+            if isError { errorsByModel[model, default: 0] += 1 }
+
+            // Tokens.
+            let cacheRead = log.metadata?.usage_object?.cache_read_input_tokens ?? 0
+            t.cacheTokensSaved += cacheRead
+        }
+
+        t.totalRequests = logs.count
+        t.errorCount = errorsByModel.values.reduce(0, +)
+        t.errorRate = t.totalRequests > 0 ? Double(t.errorCount) / Double(t.totalRequests) : 0
+        t.topFailingModel = errorsByModel.max { $0.value < $1.value }.map { ($0.key, $0.value) }
+
+        // Hit-rate: cache_read_input_tokens / total_tokens (closest proxy available).
+        let totalAll = logs.reduce(0) { $0 + ($1.metadata?.usage_object?.total_tokens ?? $1.total_tokens ?? 0) }
+        t.cacheHitRate = totalAll > 0 ? Double(t.cacheTokensSaved) / Double(totalAll) : 0
+
+        // Top models by latency, capped to 5 by request count.
+        let top = latencies
+            .filter { !$0.value.isEmpty }
+            .sorted { $0.value.count > $1.value.count }
+            .prefix(5)
+        t.latencyByModel = top.map { (model, values) in
+            let sorted = values.sorted()
+            let p = { (q: Double) -> Double in
+                let i = Int(Double(sorted.count - 1) * q)
+                return sorted[max(0, min(i, sorted.count - 1))]
+            }
+            return ModelLatency(model: model, count: values.count,
+                                p50: p(0.5), p95: p(0.95))
+        }
+
+        return t
     }
 
     private func fetchBudget(apiKey: String) async {

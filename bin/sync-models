@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for cmd in curl jq python3; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Error: '$cmd' is required but not installed." >&2
+    exit 1
+  fi
+done
+
+# --- Config: URL + key sourced from llm-usage app config files ---
+# Same files the menu bar app uses. No hardcoded URLs.
+CONFIG_FILE="$HOME/.llm-usage-config"
+KEY_FILE="$HOME/.llm-usage-key"
+MODELS_CACHE="$HOME/.llm-usage-models.json"
+
+if [[ -f "$CONFIG_FILE" ]]; then
+  BASE_URL=$(tr -d '[:space:]' < "$CONFIG_FILE")
+else
+  BASE_URL="https://llm-gateway.usemultiplier.cloud"
+fi
+
+# Priority: env var > ~/.llm-usage-key > default
+if [[ -n "${LLM_GATEWAY_API_KEY:-}" ]]; then
+  API_KEY="$LLM_GATEWAY_API_KEY"
+elif [[ -f "$KEY_FILE" ]]; then
+  API_KEY=$(tr -d '[:space:]' < "$KEY_FILE")
+else
+  API_KEY="sk-ve69-kMZPEtcKx6wA518BA"
+fi
+
+PROVIDER_NAME="litellm-multiplier"
+ENDPOINT="${BASE_URL}/models?return_wildcard_routes=false&include_model_access_groups=false&only_model_access_groups=false&include_metadata=false&healthy_only=false"
+
+BACKUP_DIR="$HOME/.config/sync-models/backups"
+mkdir -p "$BACKUP_DIR"
+
+# --- Use cache from menu bar app if < 24h old, else fetch fresh ---
+RAW_RESPONSE=""
+if [[ -f "$MODELS_CACHE" ]]; then
+  CACHE_MTIME=$(stat -f %m "$MODELS_CACHE" 2>/dev/null || echo 0)
+  CACHE_AGE=$(( $(date +%s) - CACHE_MTIME ))
+  if [[ $CACHE_AGE -lt 86400 ]]; then
+    echo "Using cached models from $MODELS_CACHE (age: $((CACHE_AGE / 60))m)"
+    RAW_RESPONSE=$(jq -c '{data: .models}' "$MODELS_CACHE")
+  fi
+fi
+
+if [[ -z "$RAW_RESPONSE" ]]; then
+  echo "Fetching models from $BASE_URL ..."
+  RAW_RESPONSE=$(curl -s -f -X 'GET' "$ENDPOINT" \
+    -H 'accept: application/json' \
+    -H "Authorization: Bearer $API_KEY" || true)
+fi
+
+if [[ -z "$RAW_RESPONSE" ]] || ! echo "$RAW_RESPONSE" | jq -e '.data' >/dev/null 2>&1; then
+  echo "Error: Failed to fetch valid models list from endpoint." >&2
+  exit 1
+fi
+
+MODEL_COUNT=$(echo "$RAW_RESPONSE" | jq '.data | length')
+echo "Fetched $MODEL_COUNT models."
+
+# --- --only=agent1,agent2 filter ---
+ONLY=""
+for arg in "$@"; do
+  case "$arg" in
+    --only=*) ONLY="${arg#--only=}" ;;
+  esac
+done
+
+backup_file() {
+  local file="$1"
+  local label="$2"
+  if [[ -f "$file" ]]; then
+    local backup_path="$BACKUP_DIR/${label}_$(date +%Y%m%d_%H%M%S).json"
+    cp "$file" "$backup_path"
+    echo "  ↳ Backed up $label"
+  fi
+}
+
+atomic_write() {
+  local tmp="$1" target="$2" label="$3"
+  if [[ ! -s "$tmp" ]]; then
+    echo "  ✗ $label: empty output" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! jq empty "$tmp" 2>/dev/null; then
+    echo "  ✗ $label: invalid JSON generated" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$target"
+  echo "  ↳ Synced $label"
+  return 0
+}
+
+# --- Agent: opencode ---
+sync_opencode() {
+  local config_dir="$HOME/.config/opencode"
+  mkdir -p "$config_dir"
+
+  local config_file
+  if [[ -f "$config_dir/opencode.jsonc" ]]; then
+    config_file="$config_dir/opencode.jsonc"
+  else
+    config_file="$config_dir/opencode.json"
+  fi
+
+  echo ""
+  echo "[opencode] target: $config_file"
+  backup_file "$config_file" "opencode"
+
+  if [[ ! -f "$config_file" ]]; then
+    echo '{"$schema":"https://opencode.ai/config.json","provider":{}}' > "$config_file"
+  fi
+
+  local tmp; tmp=$(mktemp)
+
+  if jq --arg provider "$PROVIDER_NAME" --argjson api_data "$RAW_RESPONSE" '
+    .["$schema"] = "https://opencode.ai/config.json" |
+    .provider = (.provider // {}) |
+    .provider[$provider] = (
+      .provider[$provider] // {
+        "name": "LiteLLM Multiplier",
+        "npm": "@ai-sdk/openai-compatible",
+        "options": {
+          "baseURL": "https://llm-gateway.usemultiplier.cloud"
+        }
+      }
+    ) |
+    .provider[$provider].options = (
+      .provider[$provider].options // {} |
+      .baseURL = "https://llm-gateway.usemultiplier.cloud" |
+      .apiKey = "'"$API_KEY"'"
+    ) |
+    .provider[$provider].models = (
+      $api_data.data | reduce .[] as $m ({}; .[$m.id] = { "name": $m.id })
+    )
+  ' "$config_file" > "$tmp"; then
+    atomic_write "$tmp" "$config_file" "opencode"
+  else
+    echo "  ✗ opencode: jq transformation failed" >&2
+    rm -f "$tmp"
+  fi
+}
+
+# --- Agent: pi ---
+sync_pi() {
+  local pi_models="$HOME/.pi/agent/models.json"
+  local pi_settings="$HOME/.pi/agent/settings.json"
+
+  echo ""
+  echo "[pi] targets: $pi_models, $pi_settings"
+  backup_file "$pi_models" "pi_models"
+  backup_file "$pi_settings" "pi_settings"
+
+  if [[ ! -f "$pi_models" ]]; then
+    mkdir -p "$(dirname "$pi_models")"
+    echo '{"providers":{}}' > "$pi_models"
+  fi
+  if [[ ! -f "$pi_settings" ]]; then
+    echo '{}' > "$pi_settings"
+  fi
+
+  local tmp_models tmp_settings
+  tmp_models=$(mktemp)
+  tmp_settings=$(mktemp)
+
+  if jq --arg provider "$PROVIDER_NAME" --argjson api_data "$RAW_RESPONSE" '
+    .providers = (.providers // {}) |
+    .providers[$provider] = (
+      .providers[$provider] // {}
+    ) |
+    .providers[$provider].baseURL = "https://llm-gateway.usemultiplier.cloud" |
+    .providers[$provider].apiKey = "'"$API_KEY"'" |
+    .providers[$provider].models = (
+      $api_data.data | map({
+        "id": .id,
+        "name": .id,
+        "contextWindow": (.max_input_tokens // 128000),
+        "maxTokens": (.max_output_tokens // 8192),
+        "input": ["text"]
+      })
+    )
+  ' "$pi_models" > "$tmp_models"; then
+    atomic_write "$tmp_models" "$pi_models" "pi models"
+  else
+    echo "  ✗ pi models: jq transformation failed" >&2
+    rm -f "$tmp_models"
+  fi
+
+  if jq --argjson api_data "$RAW_RESPONSE" '
+    .enabledModels = (
+      $api_data.data | map(.id)
+    )
+  ' "$pi_settings" > "$tmp_settings"; then
+    atomic_write "$tmp_settings" "$pi_settings" "pi settings"
+  else
+    echo "  ✗ pi settings: jq transformation failed" >&2
+    rm -f "$tmp_settings"
+  fi
+}
+
+# --- Agent: codex ---
+sync_codex() {
+  local config="$HOME/.codex/config.toml"
+  echo ""
+  echo "[codex] target: $config"
+  if [[ ! -f "$config" ]]; then
+    echo "  ✗ codex: $config not found, skipping" >&2
+    return 0
+  fi
+  backup_file "$config" "codex"
+
+  python3 - "$config" "$PROVIDER_NAME" "$API_KEY" "$RAW_RESPONSE" <<'PY'
+import sys, re, datetime, json
+path, provider, key, raw = sys.argv[1:5]
+data = json.loads(raw)
+
+with open(path) as f:
+    content = f.read()
+
+prov_re = re.compile(r'\[model_providers\.' + re.escape(provider) + r'\][^\[]*', re.DOTALL)
+if not prov_re.search(content):
+    content = content.rstrip() + (
+        f'\n\n[model_providers.{provider}]\n'
+        f'name = "LiteLLM Multiplier"\n'
+        f'base_url = "https://llm-gateway.usemultiplier.cloud/v1"\n'
+        f'env_key = "LITELLM_API_KEY"\n'
+        f'env_key_instructions = "Run: export LITELLM_API_KEY=\\"{key}\\""\n'
+    )
+else:
+    def _refresh(m):
+        return re.sub(
+            r'env_key_instructions = "Run: export LITELLM_API_KEY=\\"[^"]*"',
+            f'env_key_instructions = "Run: export LITELLM_API_KEY=\\"{key}\\""',
+            m.group(0),
+        )
+    content = prov_re.sub(_refresh, content)
+
+start_marker = "# >>> sync-models: models (do not edit) >>>"
+end_marker = "# <<< sync-models: models <<<"
+content = re.sub(
+    re.escape(start_marker) + r'.*?' + re.escape(end_marker) + r'\n?',
+    '', content, flags=re.DOTALL,
+)
+ts = datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+lines = [start_marker, f"# synced {ts} - {len(data['data'])} models"]
+for m in data['data']:
+    lines.append(f"# - {m['id']}")
+lines.append(end_marker)
+content = content.rstrip() + '\n\n' + '\n'.join(lines) + '\n'
+
+with open(path, 'w') as f:
+    f.write(content)
+print('  ↗ Synced codex')
+PY
+}
+
+# --- Agent: hermes ---
+sync_hermes() {
+  local config="$HOME/.hermes/config.yaml"
+
+  echo ""
+  echo "[hermes] target: $config"
+  if [[ ! -f "$config" ]]; then
+    echo "  ✗ hermes: $config not found, skipping" >&2
+    return 0
+  fi
+  backup_file "$config" "hermes"
+
+  python3 - "$config" "$PROVIDER_NAME" "$API_KEY" "$RAW_RESPONSE" <<'PY'
+import sys, re, json
+
+config_path, provider, api_key, raw = sys.argv[1:5]
+data = json.loads(raw)
+
+with open(config_path) as f:
+    content = f.read()
+
+base_url = "https://llm-gateway.usemultiplier.cloud/v1"
+
+# Build the new providers block (YAML)
+def quote_key(k: str) -> str:
+    # Quote anything with special chars; single quotes, escape internal single quotes by doubling
+    if re.match(r"^[A-Za-z0-9_\-]+$", k):
+        return k
+    return "'" + k.replace("'", "''") + "'"
+
+def yaml_str(v: str) -> str:
+    # Quote anything that could be misinterpreted; keep plain scalars safe
+    if re.match(r"^[A-Za-z0-9_\-./:@?=]+$", v):
+        return v
+    return "'" + v.replace("'", "''") + "'"
+
+lines = []
+lines.append("providers:")
+lines.append(f"  {provider}:")
+lines.append(f"    base_url: {yaml_str(base_url)}")
+lines.append(f"    api_key: {yaml_str(api_key)}")
+models = data.get("data") or []
+if models:
+    lines.append("    models:")
+    for m in models:
+        mid = m["id"]
+        ctx = m.get("max_input_tokens")
+        out = m.get("max_output_tokens")
+        lines.append(f"      {quote_key(mid)}:")
+        wrote_cap = False
+        if isinstance(ctx, int):
+            lines.append(f"        context_window: {ctx}")
+            wrote_cap = True
+        if isinstance(out, int):
+            lines.append(f"        max_output_tokens: {out}")
+            wrote_cap = True
+        if not wrote_cap:
+            lines.append("        model_family: ~")
+new_providers_block = "\n".join(lines) + "\n"
+
+# Replace existing providers block (or insert after model: if absent)
+providers_re = re.compile(r"^providers:\n(?:[ \t].*\n|\n)*", re.MULTILINE)
+if providers_re.search(content):
+    content = providers_re.sub(new_providers_block, content, count=1)
+else:
+    model_re = re.compile(r"^model:.*?\n(?=^[^\s])", re.MULTILINE | re.DOTALL)
+    m = model_re.search(content)
+    insert = "\n" + new_providers_block
+    if m:
+        content = content[:m.end()] + insert + content[m.end():]
+    else:
+        content = new_providers_block + content
+
+with open(config_path, "w") as f:
+    f.write(content)
+
+print(f"  ↳ Synced hermes ({len(models)} models)")
+PY
+}
+
+# Auto-detect which agents are present and sync them
+should_sync() {
+  local name="$1"
+  if [[ -z "$ONLY" ]]; then return 0; fi
+  [[ ",$ONLY," == *",$name,"* ]]
+}
+
+should_sync opencode && ([[ -f "$HOME/.config/opencode/opencode.json" || -f "$HOME/.config/opencode/opencode.jsonc" ]] && sync_opencode)
+should_sync pi && [[ -d "$HOME/.pi/agent" ]] && sync_pi
+should_sync codex && [[ -f "$HOME/.codex/config.toml" ]] && sync_codex
+should_sync hermes && [[ -f "$HOME/.hermes/config.yaml" ]] && sync_hermes
+
+echo ""
+echo "Done. Restart agents to pick up new models."
