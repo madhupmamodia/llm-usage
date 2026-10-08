@@ -65,17 +65,6 @@ struct ModelDetail: Codable, Equatable {
     let cache_creation_per_million: Double?
 }
 
-struct ModelCostMap: Codable {
-    // Raw cost map keyed by model id (e.g. "anthropic.claude-sonnet-5")
-    let raw: [String: ModelCostRaw]
-}
-
-struct ModelCostRaw: Codable {
-    let input_cost_per_token: Double?
-    let output_cost_per_token: Double?
-    let max_input_tokens: Int?
-}
-
 // /v2/model/info response
 struct ModelInfoResponse: Codable {
     let data: [ModelInfoRow]
@@ -101,7 +90,6 @@ struct ModelsAPIResponse: Codable {
 
 struct ModelsCache: Codable {
     let fetched_at: Date
-    let base_url: String
     let models: [AvailableModel]
 }
 
@@ -110,15 +98,6 @@ extension JSONDecoder {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
         return d
-    }
-}
-
-extension JSONEncoder {
-    static var iso: JSONEncoder {
-        let e = JSONEncoder()
-        e.dateEncodingStrategy = .iso8601
-        e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return e
     }
 }
 
@@ -181,6 +160,4 @@ struct Telemetry {
     var topFailingModel: (name: String, count: Int)?
     var cacheHitRate: Double = 0              // 0.0 - 1.0
     var cacheTokensSaved: Int = 0
-
-    var cacheSavingsUSD: Double = 0           // not implemented yet — placeholder
 }

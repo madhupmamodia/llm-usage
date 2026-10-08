@@ -119,6 +119,10 @@ struct StatsView: View {
                     .foregroundStyle(.orange)
             }
 
+            if store.activeTab != .models {
+                navHeader
+            }
+
             if store.activeTab == .overview {
                 overviewTab
             } else if store.activeTab == .insights {
@@ -130,7 +134,7 @@ struct StatsView: View {
             Divider().padding(.vertical, 2)
             HStack {
                 Button(store.isLoading ? "Refreshing…" : "Refresh") {
-                    Task { await store.fetch() }
+                    Task { await store.refreshCurrentTab() }
                 }
                 .disabled(store.isLoading)
                 Button("Change key") { store.openSetup() }
@@ -145,8 +149,6 @@ struct StatsView: View {
 
     private var overviewTab: some View {
         VStack(alignment: .leading, spacing: 6) {
-            navHeader
-
             row("Today",    String(format: "$%.2f", store.todaySpend))
             row(rangeTitle, String(format: "$%.2f", store.rangeSpend))
             row("Tokens",   formatTokens(store.rangeTokens), secondary: true)
@@ -168,11 +170,6 @@ struct StatsView: View {
                 }
             }
 
-            if !store.availableModels.isEmpty {
-                Divider().padding(.vertical, 2)
-                modelsSection
-            }
-
             if let last = store.lastFetch {
                 Divider().padding(.vertical, 2)
                 Text("Updated \(last.formatted(date: .omitted, time: .standard))")
@@ -187,53 +184,8 @@ struct StatsView: View {
             .union(store.dailyBreakdown.flatMap { $0.breakdown?.models?.keys.map { $0 } ?? [] })
     }
 
-    private var modelsSection: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text("Models").font(.caption2).foregroundStyle(.secondary)
-                Spacer()
-                Text("\(usedModelIds.count) of \(store.availableModels.count) available")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-            ForEach(store.topModelsToday.prefix(5), id: \.name) { item in
-                let m = store.availableModels.first(where: { $0.id == item.name })
-                HStack {
-                    Text(shortName(item.name))
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 8)
-                    if let maxIn = m?.max_input_tokens {
-                        Text(formatCtx(maxIn))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .font(.caption2)
-            }
-        }
-    }
-
-    private func formatCtx(_ tokens: Int) -> String {
-        if tokens >= 1_000_000 { return String(format: "%.1fM ctx", Double(tokens) / 1_000_000) }
-        if tokens >= 1_000 { return String(format: "%.0fK ctx", Double(tokens) / 1_000) }
-        return "\(tokens) ctx"
-    }
-
     private var telemetryTab: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(store.rangeLabel)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if store.telemetry.wasCapped {
-                    Text("sample of \(store.telemetry.sampleSize)/\(store.telemetry.totalInRange)")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
-            }
-            .padding(.bottom, 2)
-
             if store.telemetry.sampleSize > 0 {
                 telemetrySection
             } else {
@@ -246,6 +198,8 @@ struct StatsView: View {
     }
 
     @State private var selectedAgent: String = "all"
+    @State private var inUseOnly: Bool = false
+    @State private var searchText: String = ""
 
     private var modelsTab: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -258,29 +212,77 @@ struct StatsView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(store.availableModels.count) total, \(usedModelIds.count) in use")
+                Text("\(filteredModels.count) shown")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
+                Toggle(isOn: $inUseOnly) {
+                    Text("In use only")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
             }
+
+            TextField("Search models…", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+
+            HStack {
+                Text("Model")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("In")
+                    .frame(width: 50, alignment: .trailing)
+                Text("Out")
+                    .frame(width: 50, alignment: .trailing)
+                Text("$/1M")
+                    .frame(width: 30, alignment: .trailing)
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 1) {
-                    ForEach(store.availableModels, id: \.id) { m in
+                    ForEach(filteredModels, id: \.id) { m in
                         modelRow(m, inUse: usedModelIds.contains(m.id))
+                    }
+                    if filteredModels.isEmpty {
+                        Text("No matches")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .padding(.vertical, 4)
                     }
                 }
             }
-            .frame(maxHeight: 180)
+            .frame(maxHeight: 400)
         }
     }
 
-    private var syncSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Sync models to AI agent")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+    private var filteredModels: [AvailableModel] {
+        let base = inUseOnly
+            ? store.availableModels.filter { usedModelIds.contains($0.id) }
+            : store.availableModels
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        let matched = q.isEmpty
+            ? base
+            : base.filter { $0.id.lowercased().contains(q) }
+        // Priced first, unpriced at the bottom; each group alpha by name.
+        let withPrice = matched
+            .filter { store.modelDetails[$0.id]?.input_per_million != nil ||
+                      store.modelDetails[$0.id]?.output_per_million != nil }
+            .sorted { $0.id < $1.id }
+        let withoutPrice = matched
+            .filter { store.modelDetails[$0.id]?.input_per_million == nil &&
+                      store.modelDetails[$0.id]?.output_per_million == nil }
+            .sorted { $0.id < $1.id }
+        return withPrice + withoutPrice
+    }
 
+    private var syncSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
+                Text("Sync to AI agent")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
                 Menu {
                     ForEach(syncAgentOptions, id: \.id) { opt in
                         Button {
@@ -303,8 +305,8 @@ struct StatsView: View {
                         Image(systemName: "chevron.down")
                             .font(.system(size: 9))
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
                     .background(
                         RoundedRectangle(cornerRadius: 4)
                             .fill(Color.secondary.opacity(0.15))
@@ -313,9 +315,7 @@ struct StatsView: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
 
-                Spacer()
-
-                Button("Sync now") {
+                Button("Sync") {
                     let agents: Set<String> = selectedAgent == "all" ? [] : [selectedAgent]
                     store.runSync(agents: agents)
                 }
@@ -323,13 +323,11 @@ struct StatsView: View {
             }
 
             if !store.syncStatus.isEmpty {
-                ScrollView {
-                    Text(store.syncStatus)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxHeight: 50)
+                Text(store.syncStatus)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -361,7 +359,7 @@ struct StatsView: View {
     }
 
     private func modelRow(_ m: AvailableModel, inUse: Bool) -> some View {
-        HStack {
+        HStack(spacing: 0) {
             if inUse {
                 Image(systemName: "circle.fill")
                     .font(.system(size: 6))
@@ -373,24 +371,35 @@ struct StatsView: View {
             }
             Text(m.id)
                 .lineLimit(1).truncationMode(.middle)
-            Spacer(minLength: 8)
+                .padding(.leading, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if let d = store.modelDetails[m.id] {
-                Text(costText(d))
+                Text(formatCost(d.input_per_million))
                     .font(.caption2.monospacedDigit())
+                    .frame(width: 50, alignment: .trailing)
                     .foregroundStyle(.secondary)
+                Text(formatCost(d.output_per_million))
+                    .font(.caption2.monospacedDigit())
+                    .frame(width: 50, alignment: .trailing)
+                    .foregroundStyle(.secondary)
+                Text("$/1M")
+                    .font(.caption2)
+                    .frame(width: 30, alignment: .trailing)
+                    .foregroundStyle(.tertiary)
             } else {
                 Text("—")
                     .font(.caption2)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                     .foregroundStyle(.tertiary)
             }
         }
         .font(.caption2)
     }
 
-    private func costText(_ d: ModelDetail) -> String {
-        let in_ = d.input_per_million.map { String(format: "$%.2f", $0) } ?? "—"
-        let out = d.output_per_million.map { String(format: "$%.2f", $0) } ?? "—"
-        return "\(in_) / \(out) per 1M"
+    private func formatCost(_ v: Double?) -> String {
+        guard let v else { return "—" }
+        if v < 0.01 { return String(format: "$%.3f", v) }
+        return String(format: "$%.2f", v)
     }
 
     private func errorBanner(_ err: String) -> some View {
@@ -401,7 +410,7 @@ struct StatsView: View {
                     .foregroundStyle(.red)
                     .lineLimit(2)
                 Spacer()
-                Button("Retry") { Task { await store.fetch() } }
+                Button("Retry") { Task { await store.refreshCurrentTab() } }
                     .controlSize(.small)
                     .disabled(store.isLoading)
             }
@@ -548,6 +557,17 @@ struct StatsView: View {
     private var telemetrySection: some View {
         VStack(alignment: .leading, spacing: 4) {
             if !store.telemetry.latencyByModel.isEmpty {
+                HStack {
+                    Text("Latency")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if store.telemetry.wasCapped {
+                        Text("sample of \(store.telemetry.sampleSize)/\(store.telemetry.totalInRange)")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
                 latencyTable
             }
 
