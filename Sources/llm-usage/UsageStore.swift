@@ -88,6 +88,8 @@ final class UsageStore: ObservableObject {
         return Int(interval / 86400)
     }
 
+    @Published var telemetry: Telemetry = Telemetry()
+
     private let keyPath: URL
     private let userPath: URL
     private let configPath: URL
@@ -340,6 +342,118 @@ final class UsageStore: ObservableObject {
 
         // Budget is rolling (e.g. 7d) — independent of selected date range.
         await fetchBudget(apiKey: apiKey)
+        await fetchTelemetry(apiKey: apiKey)
+    }
+
+    private func fetchTelemetry(apiKey: String) async {
+        guard let baseURL else { return }
+        // Pull today + yesterday to get a meaningful sample even on a quiet day.
+        let cal = Calendar(identifier: .iso8601)
+        let now = Date()
+        let yesterday = cal.date(byAdding: .day, value: -1, to: now) ?? now
+        let startStr = Self.apiDateFmt.string(from: yesterday)
+        let endStr = Self.apiDateFmt.string(from: now)
+        var comps = URLComponents(url: baseURL.appendingPathComponent("spend/logs/v2"), resolvingAgainstBaseURL: false)!
+        comps.queryItems = [
+            URLQueryItem(name: "start_date", value: startStr),
+            URLQueryItem(name: "end_date", value: endStr),
+            URLQueryItem(name: "page", value: "1"),
+            URLQueryItem(name: "page_size", value: "1000"),
+        ]
+        if let userId {
+            comps.queryItems?.append(URLQueryItem(name: "user_id", value: userId))
+        }
+        var r = URLRequest(url: comps.url!)
+        r.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        r.timeoutInterval = 15
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: r)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            let decoded = try JSONDecoder().decode(SpendLogResponse.self, from: data)
+            telemetry = Self.computeTelemetry(from: decoded.data ?? [])
+            NSLog("LLMUsage telemetry: %d logs, %d errors, %d cache tokens",
+                  telemetry.sampleSize, telemetry.errorCount, telemetry.cacheTokensSaved)
+        } catch {
+            NSLog("LLMUsage telemetry fetch error: %@", error.localizedDescription)
+        }
+    }
+
+    private static func computeTelemetry(from logs: [SpendLogEntry]) -> Telemetry {
+        var t = Telemetry()
+        t.sampleSize = logs.count
+
+        // Latency buckets by model.
+        var latencies: [String: [Double]] = [:]
+        var errorsByModel: [String: Int] = [:]
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoNoFrac = ISO8601DateFormatter()
+        isoNoFrac.formatOptions = [.withInternetDateTime]
+
+        for log in logs {
+            let model = log.model ?? "unknown"
+
+            // Latency.
+            if let s = log.startTime, let e = log.endTime,
+               let sd = iso.date(from: s) ?? isoNoFrac.date(from: s),
+               let ed = iso.date(from: e) ?? isoNoFrac.date(from: e) {
+                let ms = ed.timeIntervalSince(sd) * 1000
+                if ms >= 0 && ms < 600_000 { // ignore >10min as outliers
+                    latencies[model, default: []].append(ms)
+                }
+            }
+
+            // Error detection: status set, or error_information present.
+            let isError: Bool = {
+                if let status = log.metadata?.status, !status.isEmpty,
+                   status.lowercased() != "success" && status != "200" {
+                    return true
+                }
+                if log.metadata?.error_information != nil { return true }
+                return false
+            }()
+            if isError { errorsByModel[model, default: 0] += 1 }
+
+            // Tokens.
+            let usage = log.metadata?.usage_object
+            let total = usage?.total_tokens ?? log.total_tokens ?? 0
+            let prompt = usage?.prompt_tokens ?? log.prompt_tokens ?? 0
+            let completion = usage?.completion_tokens ?? log.completion_tokens ?? 0
+            let cacheRead = usage?.cache_read_input_tokens ?? 0
+            t.inputTokens += prompt
+            t.outputTokens += completion
+            t.cacheTokensSaved += cacheRead
+            // totalTokens used here includes cached reads; for hit-rate denom
+            // we want the full input stream including cache.
+            _ = total
+        }
+
+        t.totalRequests = logs.count
+        t.errorCount = errorsByModel.values.reduce(0, +)
+        t.errorRate = t.totalRequests > 0 ? Double(t.errorCount) / Double(t.totalRequests) : 0
+        t.topFailingModel = errorsByModel.max { $0.value < $1.value }.map { ($0.key, $0.value) }
+
+        let denomCache = t.inputTokens + t.cacheTokensSaved
+        t.cacheHitRate = denomCache > 0 ? Double(t.cacheTokensSaved) / Double(denomCache) : 0
+        t.tokenEfficiency = t.inputTokens > 0 ? Double(t.outputTokens) / Double(t.inputTokens) : 0
+
+        // Top models by latency, capped to 5 by request count.
+        let top = latencies
+            .filter { !$0.value.isEmpty }
+            .sorted { $0.value.count > $1.value.count }
+            .prefix(5)
+        t.latencyByModel = top.map { (model, values) in
+            let sorted = values.sorted()
+            let p = { (q: Double) -> Double in
+                let i = Int(Double(sorted.count - 1) * q)
+                return sorted[max(0, min(i, sorted.count - 1))]
+            }
+            return ModelLatency(model: model, count: values.count,
+                                p50: p(0.5), p95: p(0.95))
+        }
+
+        return t
     }
 
     private func fetchBudget(apiKey: String) async {

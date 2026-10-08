@@ -122,6 +122,11 @@ struct StatsView: View {
                 budgetSection
             }
 
+            if store.telemetry.sampleSize > 0 {
+                Divider().padding(.vertical, 2)
+                telemetrySection
+            }
+
             if !store.topModelsToday.isEmpty {
                 Divider().padding(.vertical, 2)
                 Text("Top models today")
@@ -306,6 +311,98 @@ struct StatsView: View {
         if fraction >= 0.9 { return .red }
         if fraction >= 0.7 { return .orange }
         return .green
+    }
+
+    private var telemetrySection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Telemetry (last 24h)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            if !store.telemetry.latencyByModel.isEmpty {
+                Text("Latency (p50 / p95)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                ForEach(store.telemetry.latencyByModel) { m in
+                    HStack {
+                        Text(shortName(m.model))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text("\(formatMs(m.p50)) / \(formatMs(m.p95))")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption2)
+                }
+            }
+
+            HStack {
+                Text("Errors").foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Text(errorText)
+                    .monospacedDigit()
+                    .foregroundStyle(errorColor)
+            }
+            .font(.caption2)
+
+            if let top = store.telemetry.topFailingModel {
+                HStack {
+                    Text("Top failing").foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Text("\(shortName(top.name)) (\(top.count))")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption2)
+            }
+
+            if store.telemetry.cacheTokensSaved > 0 {
+                HStack {
+                    Text("Cache hit").foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Text("\(Int(store.telemetry.cacheHitRate * 100))% (\(formatTokens(store.telemetry.cacheTokensSaved)) tok)")
+                        .monospacedDigit()
+                        .foregroundStyle(.green)
+                }
+                .font(.caption2)
+            }
+
+            if store.telemetry.inputTokens > 0 {
+                HStack {
+                    Text("Token eff.").foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Text("1 : \(String(format: "%.1f", store.telemetry.tokenEfficiency))")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Text("  (out:in)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+                .font(.caption2)
+            }
+        }
+    }
+
+    private var errorText: String {
+        let t = store.telemetry
+        if t.totalRequests == 0 { return "—" }
+        let pct = Int(t.errorRate * 100)
+        let suffix = t.errorRate == 0 ? "0%" : String(format: "%d%% (%d of %d)", pct, t.errorCount, t.totalRequests)
+        if pct == 0 { return "0 errors" }
+        return suffix
+    }
+
+    private var errorColor: Color {
+        let r = store.telemetry.errorRate
+        if r >= 0.05 { return .red }
+        if r >= 0.02 { return .orange }
+        return .secondary
+    }
+
+    private func formatMs(_ ms: Double) -> String {
+        if ms < 1000 { return String(format: "%.0fms", ms) }
+        return String(format: "%.1fs", ms / 1000)
     }
 
     private func formatTokens(_ n: Int) -> String {
