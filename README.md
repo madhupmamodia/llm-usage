@@ -17,6 +17,40 @@ Builds locally + installs to `/Applications` + launches. No download, no Gatekee
 To update later: `git pull && ./bin/bundle.sh --install`.
 To uninstall: `./bin/bundle.sh --uninstall`.
 
+## Update
+
+App version is shown in the menu bar: click the chart icon, the title bar shows `LLM Usage`.
+
+### From a git clone (recommended)
+
+```bash
+cd ~/path/to/llm-usage
+git pull
+./bin/bundle.sh --install
+```
+
+The script kills the running instance, rebuilds, copies to `/Applications`, and relaunches. Config in `~/.llm-usage-*` is preserved.
+
+### From a pre-built release
+
+```bash
+# Download LLMUsage.zip from https://github.com/madhupmamodia/llm-usage/releases
+# Then:
+rm -rf /Applications/LLMUsage.app
+unzip -o ~/Downloads/LLMUsage.zip -d /Applications/
+open /Applications/LLMUsage.app
+```
+
+First launch after replacing the bundle: right-click → Open → "Open" to clear Gatekeeper (one-time per machine).
+
+### Check your version
+
+```bash
+defaults read /Applications/LLMUsage.app/Contents/Info CFBundleShortVersionString
+```
+
+CI auto-cuts a new version on every push to `main`. The `Latest` release is always the most recent.
+
 ## Releases (alternative)
 
 → https://github.com/madhupmamodia/llm-usage/releases
