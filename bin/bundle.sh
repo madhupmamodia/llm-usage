@@ -54,7 +54,29 @@ if xcode-select -p 2>/dev/null | grep -qv "CommandLineTools"; then
 fi
 
 echo "Building release..."
-swift build -c release
+
+# Workaround for Swift 6.3.3 CLT bug: libPackageDescription.dylib exports
+# SwiftLanguageMode symbol but the 5.9 manifest interface still uses the
+# deprecated SwiftVersion typealias, causing a linker mismatch.
+# Tried first; if your toolchain doesn't have the bug, plain build wins.
+# (Reported by @Renju Jose, Oct 2026.)
+MANIFEST_ALIAS_FLAGS=(
+  -Xbuild-tools-swiftc -Xlinker -Xbuild-tools-swiftc -alias
+  -Xbuild-tools-swiftc -Xlinker -Xbuild-tools-swiftc '_$s18PackageDescription0A0C4name19defaultLocalization9platforms9pkgConfig9providers8products12dependencies7targets21swiftLanguageVersions01cN8Standard03cxxnP0ACSS_AA0N3TagVSgSayAA17SupportedPlatformVGSgSSSgSayAA06SystemA8ProviderOGSgSayAA7ProductCGSayAC10DependencyCGSayAA6TargetCGSayAA05SwiftN4ModeOGSgAA09CLanguageP0OSgAA011CXXLanguageP0OSgtcfC'
+  -Xbuild-tools-swiftc -Xlinker -Xbuild-tools-swiftc '_$s18PackageDescription0A0C4name19defaultLocalization9platforms9pkgConfig9providers8products12dependencies7targets21swiftLanguageVersions01cN8Standard03cxxnP0ACSS_AA0N3TagVSgSayAA17SupportedPlatformVGSgSSSgSayAA06SystemA8ProviderOGSgSayAA7ProductCGSayAC10DependencyCGSayAA6TargetCGSayAA12SwiftVersionOGSgAA09CLanguageP0OSgAA011CXXLanguageP0OSgtcfC'
+)
+
+if swift build -c release; then
+  echo "Built with plain swift build."
+elif swift build -c release "${MANIFEST_ALIAS_FLAGS[@]}"; then
+  echo "Built with manifest alias workaround (Swift 6.3.3 CLT bug)."
+else
+  # Last resort: compile sources directly with swiftc, bypassing SPM.
+  echo "SwiftPM build failed; falling back to direct swiftc..."
+  mkdir -p .build/release
+  swiftc -O -target arm64-apple-macosx14.0 -parse-as-library \
+    Sources/llm-usage/*.swift -o .build/release/llm-usage
+fi
 
 echo "Wrapping in $APP_DIR..."
 rm -rf "$APP_DIR"
