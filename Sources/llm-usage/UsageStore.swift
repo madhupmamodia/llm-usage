@@ -41,7 +41,7 @@ final class UsageStore: ObservableObject {
     @Published var customEndText: String = ""
     @Published var activeTab: AppTab = .overview
     @Published var availableModels: [AvailableModel] = []
-    @Published var modelCosts: [String: ModelCost] = [:]   // resolved by model id with prefix-strip
+    @Published var modelDetails: [String: ModelDetail] = [:]   // keyed by model name from /v2/model/info
     @Published var syncStatus: String = ""               // last sync result text
     @Published var lastSyncedAt: Date?
     @Published var budgetMax: Double?
@@ -192,54 +192,47 @@ final class UsageStore: ObservableObject {
     }
 
     private func fetchModelCosts(apiKey: String, baseURL: URL) async {
-        // Public endpoint, but we send the same auth header for consistency.
-        var comps = URLComponents(url: baseURL.appendingPathComponent("public/litellm_model_cost_map"), resolvingAgainstBaseURL: false)!
-        var req = URLRequest(url: comps.url!)
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        req.timeoutInterval = 15
-        do {
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
-            // Raw shape: { "model_id": { input_cost_per_token, output_cost_per_token, ... } }
-            let raw = try JSONDecoder().decode([String: ModelCostRaw].self, from: data)
-            modelCosts = Self.resolveCosts(for: availableModels, raw: raw)
-        } catch {
-            NSLog("LLMUsage cost fetch error: %@", error.localizedDescription)
-        }
-    }
-
-    private static func resolveCosts(
-        for models: [AvailableModel],
-        raw: [String: ModelCostRaw]
-    ) -> [String: ModelCost] {
-        var out: [String: ModelCost] = [:]
-        for m in models {
-            let candidates = costKeyCandidates(for: m.id)
-            for key in candidates {
-                if let r = raw[key] {
-                    out[m.id] = ModelCost(
-                        input_per_million: r.input_cost_per_token.map { $0 * 1_000_000 },
-                        output_per_million: r.output_cost_per_token.map { $0 * 1_000_000 },
-                        max_input_tokens: r.max_input_tokens
+        // /v2/model/info returns per-model config (cost, max tokens, cache pricing).
+        // Paginated, size=50. Stop when an empty page comes back.
+        var page = 1
+        var collected: [String: ModelDetail] = [:]
+        while true {
+            var comps = URLComponents(url: baseURL.appendingPathComponent("v2/model/info"), resolvingAgainstBaseURL: false)!
+            comps.queryItems = [
+                URLQueryItem(name: "include_team_models", value: "true"),
+                URLQueryItem(name: "page", value: "\(page)"),
+                URLQueryItem(name: "size", value: "50"),
+            ]
+            var req = URLRequest(url: comps.url!)
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            req.timeoutInterval = 15
+            do {
+                let (data, response) = try await URLSession.shared.data(for: req)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else { break }
+                let decoded = try JSONDecoder().decode(ModelInfoResponse.self, from: data)
+                let rows = decoded.data
+                if rows.isEmpty { break }
+                for row in rows {
+                    let mi = row.model_info
+                    collected[row.model_name] = ModelDetail(
+                        model_name: row.model_name,
+                        input_per_million: mi.input_cost_per_token.map { $0 * 1_000_000 },
+                        output_per_million: mi.output_cost_per_token.map { $0 * 1_000_000 },
+                        max_input_tokens: mi.max_input_tokens,
+                        max_output_tokens: mi.max_output_tokens,
+                        cache_read_per_million: mi.cache_read_input_token_cost.map { $0 * 1_000_000 },
+                        cache_creation_per_million: mi.cache_creation_input_token_cost.map { $0 * 1_000_000 }
                     )
-                    break
                 }
+                if rows.count < 50 { break }
+                page += 1
+            } catch {
+                NSLog("LLMUsage v2 model info error: %@", error.localizedDescription)
+                break
             }
         }
-        return out
-    }
-
-    private static func costKeyCandidates(for id: String) -> [String] {
-        var keys = [id]
-        for prefix in ["mpl/", "bedrock/", "openai/", "anthropic.", "gemini/"] {
-            if id.hasPrefix(prefix) {
-                keys.append(String(id.dropFirst(prefix.count)))
-            }
-        }
-        if id.hasPrefix("bedrock-") {
-            keys.append("bedrock/" + String(id.dropFirst("bedrock-".count)))
-        }
-        return keys
+        modelDetails = collected
+        NSLog("LLMUsage v2 model info: %d models with cost", collected.count)
     }
 
     private func requestNotificationPermission() async {

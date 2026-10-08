@@ -55,10 +55,14 @@ struct AvailableModel: Codable, Identifiable, Equatable {
     let max_output_tokens: Int?
 }
 
-struct ModelCost: Codable, Equatable {
+struct ModelDetail: Codable, Equatable {
+    let model_name: String
     let input_per_million: Double?
     let output_per_million: Double?
     let max_input_tokens: Int?
+    let max_output_tokens: Int?
+    let cache_read_per_million: Double?
+    let cache_creation_per_million: Double?
 }
 
 struct ModelCostMap: Codable {
@@ -70,6 +74,25 @@ struct ModelCostRaw: Codable {
     let input_cost_per_token: Double?
     let output_cost_per_token: Double?
     let max_input_tokens: Int?
+}
+
+// /v2/model/info response
+struct ModelInfoResponse: Codable {
+    let data: [ModelInfoRow]
+}
+
+struct ModelInfoRow: Codable {
+    let model_name: String
+    let model_info: ModelInfoFields
+}
+
+struct ModelInfoFields: Codable {
+    let input_cost_per_token: Double?
+    let output_cost_per_token: Double?
+    let max_input_tokens: Int?
+    let max_output_tokens: Int?
+    let cache_creation_input_token_cost: Double?
+    let cache_read_input_token_cost: Double?
 }
 
 struct ModelsAPIResponse: Codable {

@@ -245,7 +245,7 @@ struct StatsView: View {
         }
     }
 
-    @State private var selectedAgents: Set<String> = ["opencode", "pi", "codex", "cursor", "hermes"]
+    @State private var selectedAgent: String = "all"
 
     private var modelsTab: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -253,65 +253,75 @@ struct StatsView: View {
 
             Divider().padding(.vertical, 2)
 
-            Text("Models")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
             HStack {
-                Text("\(usedModelIds.count) of \(store.availableModels.count) in use")
+                Text("Models")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(store.availableModels.count) total, \(usedModelIds.count) in use")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
-                Spacer()
-                if let last = store.lastSyncedAt {
-                    Text("synced \(last.formatted(date: .omitted, time: .standard))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(store.availableModels, id: \.id) { m in
+                        modelRow(m, inUse: usedModelIds.contains(m.id))
+                    }
                 }
             }
-            ForEach(store.availableModels.filter { usedModelIds.contains($0.id) }.prefix(8), id: \.id) { m in
-                modelRow(m)
-            }
+            .frame(maxHeight: 180)
         }
     }
 
     private var syncSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Sync models to AI agent")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             HStack {
-                Text("Sync to AI agents")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Sync now") { store.runSync(agents: selectedAgents) }
-                    .controlSize(.small)
-                    .disabled(selectedAgents.isEmpty)
-            }
-            // Two rows of agent checkboxes
-            let agents = [
-                ("opencode", FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.config/opencode/opencode.json") ||
-                              FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.config/opencode/opencode.jsonc")),
-                ("pi",       FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.pi/agent")),
-                ("codex",    FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.codex/config.toml")),
-                ("cursor",   FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.cursor/cli-config.json")),
-                ("hermes",   FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.hermes/config.yaml")),
-            ]
-            HStack(spacing: 12) {
-                ForEach(agents, id: \.0) { name, installed in
-                    Button {
-                        if selectedAgents.contains(name) {
-                            selectedAgents.remove(name)
-                        } else {
-                            selectedAgents.insert(name)
+                Menu {
+                    ForEach(syncAgentOptions, id: \.id) { opt in
+                        Button {
+                            selectedAgent = opt.id
+                        } label: {
+                            HStack {
+                                if opt.installed {
+                                    Image(systemName: "checkmark.circle.fill")
+                                } else {
+                                    Image(systemName: "circle.dashed")
+                                }
+                                Text(opt.label)
+                            }
                         }
-                    } label: {
-                        Text("\(installed ? "●" : "○") \(name)")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(
-                                selectedAgents.contains(name) ? .primary :
-                                installed ? .secondary : .tertiary
-                            )
                     }
-                    .buttonStyle(.borderless)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(syncAgentOptions.first(where: { $0.id == selectedAgent })?.label ?? "Pick agent")
+                            .font(.system(size: 12))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.secondary.opacity(0.15))
+                    )
                 }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
+                Spacer()
+
+                Button("Sync now") {
+                    let agents: Set<String> = selectedAgent == "all" ? [] : [selectedAgent]
+                    store.runSync(agents: agents)
+                }
+                .controlSize(.small)
             }
+
             if !store.syncStatus.isEmpty {
                 ScrollView {
                     Text(store.syncStatus)
@@ -319,18 +329,53 @@ struct StatsView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 60)
+                .frame(maxHeight: 50)
             }
         }
     }
 
-    private func modelRow(_ m: AvailableModel) -> some View {
+    private var syncAgentOptions: [(id: String, label: String, installed: Bool)] {
+        let opencodePath = ("~/.config/opencode/opencode.json" as NSString).expandingTildeInPath
+        let opencodeAlt = ("~/.config/opencode/opencode.jsonc" as NSString).expandingTildeInPath
+        let opencodeInstalled = FileManager.default.fileExists(atPath: opencodePath) ||
+                               FileManager.default.fileExists(atPath: opencodeAlt)
+        let piInstalled = FileManager.default.fileExists(atPath: ("~/.pi/agent" as NSString).expandingTildeInPath)
+        let codexInstalled = FileManager.default.fileExists(atPath: ("~/.codex/config.toml" as NSString).expandingTildeInPath)
+        let hermesInstalled = FileManager.default.fileExists(atPath: ("~/.hermes/config.yaml" as NSString).expandingTildeInPath)
+
+        func opt(_ id: String, _ installed: Bool) -> (id: String, label: String, installed: Bool) {
+            (id, "\(id) (\(installed ? "installed" : "not found"))", installed)
+        }
+
+        return [
+            ("all", "All installed agents", true),
+            opt("opencode", opencodeInstalled),
+            opt("pi", piInstalled),
+            opt("codex", codexInstalled),
+            opt("hermes", hermesInstalled),
+        ]
+    }
+
+    private func installedAt(_ path: String) -> Bool {
+        FileManager.default.fileExists(atPath: (path as NSString).expandingTildeInPath)
+    }
+
+    private func modelRow(_ m: AvailableModel, inUse: Bool) -> some View {
         HStack {
+            if inUse {
+                Image(systemName: "circle.fill")
+                    .font(.system(size: 6))
+                    .foregroundStyle(.green)
+            } else {
+                Image(systemName: "circle")
+                    .font(.system(size: 6))
+                    .foregroundStyle(.tertiary)
+            }
             Text(m.id)
                 .lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 8)
-            if let c = store.modelCosts[m.id] {
-                Text(costText(c))
+            if let d = store.modelDetails[m.id] {
+                Text(costText(d))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
             } else {
@@ -342,9 +387,9 @@ struct StatsView: View {
         .font(.caption2)
     }
 
-    private func costText(_ c: ModelCost) -> String {
-        let in_ = c.input_per_million.map { String(format: "$%.2f", $0) } ?? "—"
-        let out = c.output_per_million.map { String(format: "$%.2f", $0) } ?? "—"
+    private func costText(_ d: ModelDetail) -> String {
+        let in_ = d.input_per_million.map { String(format: "$%.2f", $0) } ?? "—"
+        let out = d.output_per_million.map { String(format: "$%.2f", $0) } ?? "—"
         return "\(in_) / \(out) per 1M"
     }
 

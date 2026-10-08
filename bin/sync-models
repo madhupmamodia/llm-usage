@@ -259,39 +259,6 @@ print('  ↗ Synced codex')
 PY
 }
 
-# --- Agent: cursor ---
-sync_cursor() {
-  local config="$HOME/.cursor/cli-config.json"
-  local cursor_provider="litellm"  # Cursor's existing provider key
-
-  echo ""
-  echo "[cursor] target: $config"
-  if [[ ! -f "$config" ]]; then
-    echo "  ✗ cursor: $config not found, skipping" >&2
-    return 0
-  fi
-  backup_file "$config" "cursor"
-
-  local tmp; tmp=$(mktemp)
-  if jq --arg provider "$cursor_provider" --arg base "https://llm-gateway.usemultiplier.cloud/v1" --arg key "$API_KEY" --argjson api_data "$RAW_RESPONSE" '
-    .providers = (.providers // {}) |
-    # drop any prior litellm* keys (handles legacy "litellm-multiplier" duplicates)
-    .providers |= with_entries(select(.key | startswith("litellm") | not)) |
-    .providers[$provider] = {
-      "baseUrl": $base,
-      "apiKey": $key,
-      "models": (
-        $api_data.data | reduce .[] as $m ({}; .[$m.id] = { "id": $m.id })
-      )
-    }
-  ' "$config" > "$tmp"; then
-    atomic_write "$tmp" "$config" "cursor"
-  else
-    echo "  ✗ cursor: jq transformation failed" >&2
-    rm -f "$tmp"
-  fi
-}
-
 # --- Agent: hermes ---
 sync_hermes() {
   local config="$HOME/.hermes/config.yaml"
@@ -382,7 +349,6 @@ should_sync() {
 should_sync opencode && ([[ -f "$HOME/.config/opencode/opencode.json" || -f "$HOME/.config/opencode/opencode.jsonc" ]] && sync_opencode)
 should_sync pi && [[ -d "$HOME/.pi/agent" ]] && sync_pi
 should_sync codex && [[ -f "$HOME/.codex/config.toml" ]] && sync_codex
-should_sync cursor && [[ -f "$HOME/.cursor/cli-config.json" ]] && sync_cursor
 should_sync hermes && [[ -f "$HOME/.hermes/config.yaml" ]] && sync_hermes
 
 echo ""
