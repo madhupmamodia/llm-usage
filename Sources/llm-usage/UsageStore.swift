@@ -34,6 +34,7 @@ final class UsageStore: ObservableObject {
     @Published var customStartText: String = ""
     @Published var customEndText: String = ""
     @Published var activeTab: AppTab = .overview
+    @Published var availableModels: [AvailableModel] = []
     @Published var budgetMax: Double?
     @Published var budgetSpend: Double = 0
     @Published var budgetDuration: String?
@@ -103,12 +104,15 @@ final class UsageStore: ObservableObject {
     private let keyPath: URL
     private let userPath: URL
     private let configPath: URL
+    private let modelsPath: URL
+    static let modelsRefreshInterval: TimeInterval = 86_400  // 24h
 
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         self.keyPath = home.appendingPathComponent(".llm-usage-key")
         self.userPath = home.appendingPathComponent(".llm-usage-user")
         self.configPath = home.appendingPathComponent(".llm-usage-config")
+        self.modelsPath = home.appendingPathComponent(".llm-usage-models.json")
 
         let storedKey = Self.readFile(keyPath)
         let uid = Self.readFile(userPath)
@@ -138,7 +142,43 @@ final class UsageStore: ObservableObject {
             startPolling()
         }
 
+        loadModelsCache()
         Task { await requestNotificationPermission() }
+    }
+
+    private func loadModelsCache() {
+        guard let data = try? Data(contentsOf: modelsPath),
+              let cache = try? JSONDecoder.iso.decode(ModelsCache.self, from: data) else { return }
+        availableModels = cache.models
+    }
+
+    private func fetchModels(apiKey: String, baseURL: URL) async {
+        var comps = URLComponents(url: baseURL.appendingPathComponent("models"), resolvingAgainstBaseURL: false)!
+        comps.queryItems = [
+            URLQueryItem(name: "return_wildcard_routes", value: "false"),
+            URLQueryItem(name: "include_model_access_groups", value: "false"),
+            URLQueryItem(name: "only_model_access_groups", value: "false"),
+            URLQueryItem(name: "include_metadata", value: "false"),
+            URLQueryItem(name: "healthy_only", value: "false"),
+        ]
+        var req = URLRequest(url: comps.url!)
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            let decoded = try JSONDecoder().decode(ModelsAPIResponse.self, from: data)
+            let cache = ModelsCache(fetched_at: Date(), base_url: baseURL.absoluteString, models: decoded.data)
+            if let encoded = try? JSONEncoder.iso.encode(cache) {
+                try? encoded.write(to: modelsPath, options: .atomic)
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o644], ofItemAtPath: modelsPath.path
+                )
+            }
+            availableModels = decoded.data
+        } catch {
+            NSLog("LLMUsage models fetch error: %@", error.localizedDescription)
+        }
     }
 
     private func requestNotificationPermission() async {
@@ -305,11 +345,12 @@ final class UsageStore: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        // Run all three in parallel. If any one fails, the others still complete.
+        // Run all four in parallel. If any one fails, the others still complete.
         async let activity: Void = fetchActivity(apiKey: apiKey, baseURL: baseURL)
         async let budget: Void = fetchBudget(apiKey: apiKey)
         async let telemetry: Void = fetchTelemetry(apiKey: apiKey)
-        _ = await (activity, budget, telemetry)
+        async let models: Void = fetchModels(apiKey: apiKey, baseURL: baseURL)
+        _ = await (activity, budget, telemetry, models)
     }
 
     private func fetchActivity(apiKey: String, baseURL: URL) async {

@@ -166,6 +166,11 @@ struct StatsView: View {
                 }
             }
 
+            if !store.availableModels.isEmpty {
+                Divider().padding(.vertical, 2)
+                modelsSection
+            }
+
             if let last = store.lastFetch {
                 Divider().padding(.vertical, 2)
                 Text("Updated \(last.formatted(date: .omitted, time: .standard))")
@@ -173,6 +178,43 @@ struct StatsView: View {
                     .foregroundStyle(.tertiary)
             }
         }
+    }
+
+    private var usedModelIds: Set<String> {
+        Set(store.topModelsToday.map { $0.name })
+            .union(store.dailyBreakdown.flatMap { $0.breakdown?.models?.keys.map { $0 } ?? [] })
+    }
+
+    private var modelsSection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Models").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(usedModelIds.count) of \(store.availableModels.count) available")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+            ForEach(store.topModelsToday.prefix(5), id: \.name) { item in
+                let m = store.availableModels.first(where: { $0.id == item.name })
+                HStack {
+                    Text(shortName(item.name))
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    if let maxIn = m?.max_input_tokens {
+                        Text(formatCtx(maxIn))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .font(.caption2)
+            }
+        }
+    }
+
+    private func formatCtx(_ tokens: Int) -> String {
+        if tokens >= 1_000_000 { return String(format: "%.1fM ctx", Double(tokens) / 1_000_000) }
+        if tokens >= 1_000 { return String(format: "%.0fK ctx", Double(tokens) / 1_000) }
+        return "\(tokens) ctx"
     }
 
     private var telemetryTab: some View {

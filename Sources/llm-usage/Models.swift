@@ -47,6 +47,41 @@ struct UserInfoResponse: Codable {
     let user_info: UserInfoPayload
 }
 
+// MARK: - Models (from /models)
+
+struct AvailableModel: Codable, Identifiable, Equatable {
+    let id: String
+    let max_input_tokens: Int?
+    let max_output_tokens: Int?
+}
+
+struct ModelsAPIResponse: Codable {
+    let data: [AvailableModel]
+}
+
+struct ModelsCache: Codable {
+    let fetched_at: Date
+    let base_url: String
+    let models: [AvailableModel]
+}
+
+extension JSONDecoder {
+    static var iso: JSONDecoder {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }
+}
+
+extension JSONEncoder {
+    static var iso: JSONEncoder {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return e
+    }
+}
+
 // MARK: - Spend log (from /spend/logs/v2)
 
 struct SpendLogMetadata: Codable {
