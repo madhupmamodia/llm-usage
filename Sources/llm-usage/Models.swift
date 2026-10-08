@@ -55,6 +55,23 @@ struct AvailableModel: Codable, Identifiable, Equatable {
     let max_output_tokens: Int?
 }
 
+struct ModelCost: Codable, Equatable {
+    let input_per_million: Double?
+    let output_per_million: Double?
+    let max_input_tokens: Int?
+}
+
+struct ModelCostMap: Codable {
+    // Raw cost map keyed by model id (e.g. "anthropic.claude-sonnet-5")
+    let raw: [String: ModelCostRaw]
+}
+
+struct ModelCostRaw: Codable {
+    let input_cost_per_token: Double?
+    let output_cost_per_token: Double?
+    let max_input_tokens: Int?
+}
+
 struct ModelsAPIResponse: Codable {
     let data: [AvailableModel]
 }

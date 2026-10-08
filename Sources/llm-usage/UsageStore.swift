@@ -6,9 +6,15 @@ import UserNotifications
 // MARK: - UI
 
 enum AppTab: String, CaseIterable, Identifiable {
-    case overview, insights
+    case overview, insights, models
     var id: String { rawValue }
-    var label: String { self == .overview ? "Overview" : "Insights" }
+    var label: String {
+        switch self {
+        case .overview: return "Overview"
+        case .insights: return "Insights"
+        case .models: return "Models"
+        }
+    }
 }
 
 @MainActor
@@ -35,6 +41,9 @@ final class UsageStore: ObservableObject {
     @Published var customEndText: String = ""
     @Published var activeTab: AppTab = .overview
     @Published var availableModels: [AvailableModel] = []
+    @Published var modelCosts: [String: ModelCost] = [:]   // resolved by model id with prefix-strip
+    @Published var syncStatus: String = ""               // last sync result text
+    @Published var lastSyncedAt: Date?
     @Published var budgetMax: Double?
     @Published var budgetSpend: Double = 0
     @Published var budgetDuration: String?
@@ -176,9 +185,61 @@ final class UsageStore: ObservableObject {
                 )
             }
             availableModels = decoded.data
+            await fetchModelCosts(apiKey: apiKey, baseURL: baseURL)
         } catch {
             NSLog("LLMUsage models fetch error: %@", error.localizedDescription)
         }
+    }
+
+    private func fetchModelCosts(apiKey: String, baseURL: URL) async {
+        // Public endpoint, but we send the same auth header for consistency.
+        var comps = URLComponents(url: baseURL.appendingPathComponent("public/litellm_model_cost_map"), resolvingAgainstBaseURL: false)!
+        var req = URLRequest(url: comps.url!)
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            // Raw shape: { "model_id": { input_cost_per_token, output_cost_per_token, ... } }
+            let raw = try JSONDecoder().decode([String: ModelCostRaw].self, from: data)
+            modelCosts = Self.resolveCosts(for: availableModels, raw: raw)
+        } catch {
+            NSLog("LLMUsage cost fetch error: %@", error.localizedDescription)
+        }
+    }
+
+    private static func resolveCosts(
+        for models: [AvailableModel],
+        raw: [String: ModelCostRaw]
+    ) -> [String: ModelCost] {
+        var out: [String: ModelCost] = [:]
+        for m in models {
+            let candidates = costKeyCandidates(for: m.id)
+            for key in candidates {
+                if let r = raw[key] {
+                    out[m.id] = ModelCost(
+                        input_per_million: r.input_cost_per_token.map { $0 * 1_000_000 },
+                        output_per_million: r.output_cost_per_token.map { $0 * 1_000_000 },
+                        max_input_tokens: r.max_input_tokens
+                    )
+                    break
+                }
+            }
+        }
+        return out
+    }
+
+    private static func costKeyCandidates(for id: String) -> [String] {
+        var keys = [id]
+        for prefix in ["mpl/", "bedrock/", "openai/", "anthropic.", "gemini/"] {
+            if id.hasPrefix(prefix) {
+                keys.append(String(id.dropFirst(prefix.count)))
+            }
+        }
+        if id.hasPrefix("bedrock-") {
+            keys.append("bedrock/" + String(id.dropFirst("bedrock-".count)))
+        }
+        return keys
     }
 
     private func requestNotificationPermission() async {
@@ -351,6 +412,44 @@ final class UsageStore: ObservableObject {
         async let telemetry: Void = fetchTelemetry(apiKey: apiKey)
         async let models: Void = fetchModels(apiKey: apiKey, baseURL: baseURL)
         _ = await (activity, budget, telemetry, models)
+    }
+
+    func runSync(agents: Set<String>) {
+        // Run the bundled sync-models script. Agents: opencode, pi, codex, cursor, hermes.
+        let onlyArg = agents.isEmpty ? "" : "--only=\(agents.sorted().joined(separator: ","))"
+        let task = Process()
+        let scriptPath = Bundle.main.path(forResource: "sync-models", ofType: nil)
+            ?? Bundle.main.bundlePath + "/Contents/Resources/sync-models"
+        task.executableURL = URL(fileURLWithPath: scriptPath)
+        var args: [String] = []
+        if !onlyArg.isEmpty { args.append(onlyArg) }
+        task.arguments = args
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+
+        syncStatus = "Syncing…"
+        do {
+            try task.run()
+        } catch {
+            syncStatus = "Failed to start: \(error.localizedDescription)"
+            return
+        }
+        // Read output on a background queue, then update on main.
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { return }
+            if let s = String(data: data, encoding: .utf8) {
+                Task { @MainActor in self.syncStatus = s.trimmingCharacters(in: .whitespacesAndNewlines) }
+            }
+        }
+        task.terminationHandler = { _ in
+            Task { @MainActor in
+                self.syncStatus = self.syncStatus + "\nDone."
+                self.lastSyncedAt = Date()
+            }
+        }
     }
 
     private func fetchActivity(apiKey: String, baseURL: URL) async {

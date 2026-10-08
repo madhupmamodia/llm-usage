@@ -121,8 +121,10 @@ struct StatsView: View {
 
             if store.activeTab == .overview {
                 overviewTab
-            } else {
+            } else if store.activeTab == .insights {
                 telemetryTab
+            } else {
+                modelsTab
             }
 
             Divider().padding(.vertical, 2)
@@ -241,6 +243,109 @@ struct StatsView: View {
                     .padding(.vertical, 12)
             }
         }
+    }
+
+    @State private var selectedAgents: Set<String> = ["opencode", "pi", "codex", "cursor", "hermes"]
+
+    private var modelsTab: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            syncSection
+
+            Divider().padding(.vertical, 2)
+
+            Text("Models")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            HStack {
+                Text("\(usedModelIds.count) of \(store.availableModels.count) in use")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if let last = store.lastSyncedAt {
+                    Text("synced \(last.formatted(date: .omitted, time: .standard))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            ForEach(store.availableModels.filter { usedModelIds.contains($0.id) }.prefix(8), id: \.id) { m in
+                modelRow(m)
+            }
+        }
+    }
+
+    private var syncSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Sync to AI agents")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Sync now") { store.runSync(agents: selectedAgents) }
+                    .controlSize(.small)
+                    .disabled(selectedAgents.isEmpty)
+            }
+            // Two rows of agent checkboxes
+            let agents = [
+                ("opencode", FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.config/opencode/opencode.json") ||
+                              FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.config/opencode/opencode.jsonc")),
+                ("pi",       FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.pi/agent")),
+                ("codex",    FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.codex/config.toml")),
+                ("cursor",   FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.cursor/cli-config.json")),
+                ("hermes",   FileManager.default.fileExists(atPath: "\(NSHomeDirectory())/.hermes/config.yaml")),
+            ]
+            HStack(spacing: 12) {
+                ForEach(agents, id: \.0) { name, installed in
+                    Button {
+                        if selectedAgents.contains(name) {
+                            selectedAgents.remove(name)
+                        } else {
+                            selectedAgents.insert(name)
+                        }
+                    } label: {
+                        Text("\(installed ? "●" : "○") \(name)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(
+                                selectedAgents.contains(name) ? .primary :
+                                installed ? .secondary : .tertiary
+                            )
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            if !store.syncStatus.isEmpty {
+                ScrollView {
+                    Text(store.syncStatus)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 60)
+            }
+        }
+    }
+
+    private func modelRow(_ m: AvailableModel) -> some View {
+        HStack {
+            Text(m.id)
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 8)
+            if let c = store.modelCosts[m.id] {
+                Text(costText(c))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("—")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .font(.caption2)
+    }
+
+    private func costText(_ c: ModelCost) -> String {
+        let in_ = c.input_per_million.map { String(format: "$%.2f", $0) } ?? "—"
+        let out = c.output_per_million.map { String(format: "$%.2f", $0) } ?? "—"
+        return "\(in_) / \(out) per 1M"
     }
 
     private func errorBanner(_ err: String) -> some View {
