@@ -28,6 +28,27 @@ for arg in "$@"; do
   esac
 done
 
+# Prereq checks — give a clear error if something is missing.
+if ! command -v swift >/dev/null 2>&1; then
+  echo "❌ Swift not found. Install Command Line Tools:"
+  echo "   xcode-select --install"
+  echo "   (then run: sudo xcodebuild -license accept)"
+  exit 1
+fi
+
+if ! command -v codesign >/dev/null 2>&1; then
+  echo "❌ codesign not found. Install Command Line Tools:"
+  echo "   xcode-select --install"
+  exit 1
+fi
+
+# License check. swift build will fail with a cryptic error if license isn't accepted.
+if ! xcodebuild -license check >/dev/null 2>&1; then
+  echo "❌ Xcode license not accepted. Run:"
+  echo "   sudo xcodebuild -license accept"
+  exit 1
+fi
+
 echo "Building release..."
 swift build -c release
 

@@ -10,6 +10,8 @@ cd llm-usage
 ./bin/bundle.sh --install
 ```
 
+The script checks for Swift + codesign + accepted Xcode license and prints a fix command if anything is missing. Fresh Mac? Run `xcode-select --install` and `sudo xcodebuild -license accept` first.
+
 Builds locally + installs to `/Applications` + launches. No download, no Gatekeeper prompt (locally-built apps aren't quarantined, and the bundle script strips any inherited xattrs).
 
 To update later: `git pull && ./bin/bundle.sh --install`.
